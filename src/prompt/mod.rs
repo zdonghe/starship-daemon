@@ -49,7 +49,6 @@ pub fn default_config_path() -> PathBuf {
 /// re-rendering entirely on the hot path.
 pub fn render_prompt(ctx: &RenderContext) -> String {
     let mut properties = Properties::default();
-    let t0_props = std::time::Instant::now();
     properties.status_code = Some(ctx.status_code.to_string());
     properties.keymap = ctx.keymap.clone();
 
@@ -59,10 +58,7 @@ pub fn render_prompt(ctx: &RenderContext) -> String {
         ctx.cwd.clone(), ctx.cwd.clone(), env,
     );
     sctx.width = ctx.terminal_width;
-    let t1_ctx = std::time::Instant::now();
 
     let result = print::get_prompt(&sctx);
-    let t2_render = std::time::Instant::now();
-    eprintln!("PROMPT_PROFILE: props_setup={:?}  ctx_init={:?}  get_prompt={:?}", t1_ctx.duration_since(t0_props), t2_render.duration_since(t1_ctx), t2_render.duration_since(t0_props));
     result.trim_end_matches('\n').to_string()
 }

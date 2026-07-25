@@ -201,7 +201,7 @@ fn main() {
     loop {
         let config_evt = config_watch.as_ref().map_or(std::ptr::null_mut(), |cw| cw.change_event);
         let handles = [connect_event, config_evt];
-        let rc = unsafe { WaitForMultipleObjects(handles.len() as DWORD, handles.as_ptr(), 0, 100) };
+        let rc = unsafe { WaitForMultipleObjects(handles.len() as DWORD, handles.as_ptr(), 0, 0xFFFFFFFF) };
         if rc == WAIT_TIMEOUT { continue; }
         let idx = (rc - WAIT_OBJECT_0) as usize;
         if idx == 0 {
@@ -248,13 +248,23 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
         unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
         return Ok(());
     }
+    // Profile: time each stage
+    let t0 = std::time::Instant::now();
+
     // Pre-warm OS/Defender cache: read .git files so gix doesn't wait for Defender
     let git_dir = cwd.join(".git");
     let _ = std::fs::read(git_dir.join("HEAD"));
     let _ = std::fs::read(git_dir.join("index"));
+    let t1 = std::time::Instant::now();
 
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
     let output = prompt::render_prompt(&ctx);
+    let t2 = std::time::Instant::now();
+
+    eprintln!("PROFILE: prewarm={:?}  render={:?}  total={:?}",
+        t1.duration_since(t0),
+        t2.duration_since(t1),
+        t2.duration_since(t0));
     prompt_cache.insert(ck, output.clone());
     let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
     write_all(pipe, &l); write_all(pipe, b);

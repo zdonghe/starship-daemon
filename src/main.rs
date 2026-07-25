@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use starship_daemon::prompt::{self, ModuleConfig, RenderContext};
 
-// -- Win32 FFI for named pipe + config file watching -------------------
+// -- Win32 FFI for named pipe -------------------
 
 type HANDLE = *mut c_void;
 type DWORD = u32;
@@ -20,17 +20,8 @@ const PIPE_ACCESS_DUPLEX: DWORD = 3;
 const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
 const PIPE_TYPE_MESSAGE: DWORD = 4;
 const PIPE_WAIT: DWORD = 0;
-const FILE_LIST_DIRECTORY: DWORD = 1;
-const FILE_SHARE_READ: DWORD = 1;
-const FILE_SHARE_WRITE: DWORD = 2;
-const FILE_SHARE_DELETE: DWORD = 4;
-const OPEN_EXISTING: DWORD = 3;
-const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x02000000;
-const FILE_NOTIFY_CHANGE_FILE_NAME: DWORD = 1;
-const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
 const WAIT_OBJECT_0: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
-const CHANGE_BUF_SIZE: u32 = 65536;
 
 #[repr(C)]
 struct OVERLAPPED {
@@ -43,24 +34,14 @@ extern "system" {
     fn DisconnectNamedPipe(h: HANDLE) -> BOOL;
     fn ReadFile(h: HANDLE, buf: LPVOID, len: DWORD, read: LPDWORD, overlapped: *mut c_void) -> BOOL;
     fn WriteFile(h: HANDLE, buf: LPCVOID, len: DWORD, written: LPDWORD, overlapped: *mut c_void) -> BOOL;
-    fn CloseHandle(h: HANDLE) -> BOOL;
-    fn CreateFileW(name: LPCWSTR, access: DWORD, share: DWORD, sec: *const c_void, disp: DWORD, flags: DWORD, tmpl: HANDLE) -> HANDLE;
-    fn ReadDirectoryChangesW(dir: HANDLE, buf: LPVOID, len: DWORD, subtree: BOOL, filter: DWORD, bytes: LPDWORD, overlapped: *mut c_void, comp: *const c_void) -> BOOL;
     fn CreateEventW(attr: *const c_void, manual: BOOL, init: BOOL, name: LPCWSTR) -> HANDLE;
     fn WaitForMultipleObjects(count: DWORD, handles: *const HANDLE, wait_all: BOOL, ms: DWORD) -> DWORD;
-    fn GetOverlappedResult(h: HANDLE, overlapped: *mut c_void, bytes: LPDWORD, wait: BOOL) -> BOOL;
     fn ResetEvent(h: HANDLE) -> BOOL;
     fn SetEvent(h: HANDLE) -> BOOL;
     fn GetLastError() -> DWORD;
-    fn GetProcessHeap() -> HANDLE;
-    fn HeapAlloc(heap: HANDLE, flags: DWORD, size: usize) -> LPVOID;
-    fn HeapFree(heap: HANDLE, flags: DWORD, mem: LPVOID) -> BOOL;
-    fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
 }
 
 fn to_wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() }
-fn alloc_buf() -> *mut u8 { unsafe { HeapAlloc(GetProcessHeap(), 0, CHANGE_BUF_SIZE as usize) as *mut u8 } }
-fn free_buf(p: *mut u8) { unsafe { HeapFree(GetProcessHeap(), 0, p as LPVOID); } }
 fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
     unsafe { let mut r: DWORD = 0; ReadFile(pipe, buf.as_mut_ptr() as LPVOID, buf.len() as DWORD, &mut r, std::ptr::null_mut()) != 0 && r == buf.len() as DWORD }
 }
@@ -122,128 +103,13 @@ impl ClientProps {
     }
 }
 
-// -- Prompt cache --------------------------------------------------------
-
-// -- Config file watching ------------------------------------------------
-
-struct ConfigWatch {
-    dir_handle: HANDLE, change_buf: *mut u8, overlapped: OVERLAPPED, change_event: HANDLE, config_path: PathBuf,
-}
-
-impl ConfigWatch {
-    fn new(config_path: &Path) -> Option<Self> {
-        let dir = config_path.parent()?;
-        let wide = to_wide(&dir.to_string_lossy());
-        unsafe {
-            let dh = CreateFileW(wide.as_ptr(), FILE_LIST_DIRECTORY, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_OVERLAPPED|FILE_FLAG_BACKUP_SEMANTICS, std::ptr::null_mut());
-            if dh == INVALID_HANDLE_VALUE { return None; }
-            let ev = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
-            if ev.is_null() { CloseHandle(dh); return None; }
-            let buf = alloc_buf();
-            if buf.is_null() { CloseHandle(dh); CloseHandle(ev); return None; }
-            let mut cw = ConfigWatch { dir_handle: dh, change_buf: buf, overlapped: mem::zeroed(), change_event: ev, config_path: config_path.to_path_buf() };
-            cw.start(); Some(cw)
-        }
-    }
-    fn start(&mut self) {
-        unsafe {
-            ResetEvent(self.change_event); self.overlapped = mem::zeroed(); self.overlapped.h_event = self.change_event;
-            let mut b: DWORD = 0;
-            ReadDirectoryChangesW(self.dir_handle, self.change_buf as LPVOID, CHANGE_BUF_SIZE, 0, FILE_NOTIFY_CHANGE_FILE_NAME|FILE_NOTIFY_CHANGE_LAST_WRITE, &mut b, &mut self.overlapped as *mut _ as *mut c_void, std::ptr::null());
-        }
-    }
-    fn check_event(&mut self) -> bool {
-        if self.change_event.is_null() { return false; }
-        if unsafe { WaitForSingleObject(self.change_event, 0) } != WAIT_OBJECT_0 { return false; }
-        unsafe { let mut b: DWORD = 0; GetOverlappedResult(self.dir_handle, &mut self.overlapped as *mut _ as *mut c_void, &mut b, 0); }
-        let cname = self.config_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        // Check if our config file changed
-        let raw = unsafe { std::slice::from_raw_parts(self.change_buf, CHANGE_BUF_SIZE as usize) };
-        let changed = raw.windows(cname.len()).any(|w| w == cname.as_bytes());
-        self.start();
-        changed
-    }
-}
-impl Drop for ConfigWatch {
-    fn drop(&mut self) {
-        unsafe {
-            if self.dir_handle != INVALID_HANDLE_VALUE { CloseHandle(self.dir_handle); }
-            if !self.change_buf.is_null() { free_buf(self.change_buf); }
-            CloseHandle(self.change_event);
-        }
-    }
-}
-
-
-/// Cache key with mtime-based invalidation.
-/// Checks cwd mtime (file create/delete), .git/index mtime (git add/reset),
-/// and .git/HEAD mtime (branch switch/commit) to detect stale cache.
-#[derive(Hash, Eq, PartialEq, Clone)]
-struct CacheKey {
-    cwd: PathBuf,
-    status_code: i32,
-    keymap: String,
-    terminal_width: usize,
-    time_bucket: u64,
-    cwd_mtime: u64,
-    index_mtime: u64,
-    head_mtime: u64,
-    branch_mtime: u64,
-    remote_mtime: u64,
-}
-
-fn get_mtime_ns(p: &std::path::Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
-/// Get mtime of the current branch ref and its remote tracking ref.
-fn get_branch_ref_mtimes(cwd: &PathBuf) -> (u64, u64) {
-    let git_dir = match starship_daemon::find_git_dir(cwd) {
-        Some(d) => d,
-        None => return (0, 0),
-    };
-    let head = git_dir.join("HEAD");
-    let content = std::fs::read_to_string(&head).ok();
-    let branch = content
-        .and_then(|s| s.strip_prefix("ref: refs/heads/").map(|s| s.trim().to_string()));
-    let branch_mtime = branch.as_ref()
-        .map(|b| get_mtime_ns(&git_dir.join("refs").join("heads").join(b)))
-        .unwrap_or(0);
-    let remote_mtime = branch.as_ref()
-        .map(|b| get_mtime_ns(&git_dir.join("refs").join("remotes").join("origin").join(b)))
-        .unwrap_or(0);
-    (branch_mtime, remote_mtime)
-}
-fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64) -> CacheKey {
-    let (br_mtime, rr_mtime) = get_branch_ref_mtimes(cwd);
-    let git_dir = starship_daemon::find_git_dir(cwd);
-    CacheKey {
-        cwd: cwd.clone(),
-        status_code,
-        keymap: keymap.to_string(),
-        terminal_width,
-        time_bucket,
-        cwd_mtime: get_mtime_ns(cwd),
-        index_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("index"))).unwrap_or(0),
-        head_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("HEAD"))).unwrap_or(0),
-        branch_mtime: br_mtime,
-        remote_mtime: rr_mtime,
-    }
-}
-
 fn main() {
     let config_path = prompt::default_config_path();
     let mut module_config = match prompt::load_config(&config_path) {
         Some(cfg) => cfg,
         None => { eprintln!("Could not load config"); std::process::exit(1); }
     };
-    let mut config_watch = ConfigWatch::new(&config_path);
-    let mut prompt_cache: HashMap<CacheKey, String> = HashMap::new();
+    let mut prompt_cache: HashMap<prompt::CacheKey, String> = HashMap::new();
     let wide = to_wide(starship_daemon::PIPE_NAME);
     let pipe = unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, 1, 65536, 65536, 0, std::ptr::null()) };
     if pipe == INVALID_HANDLE_VALUE { std::process::exit(0); }
@@ -254,19 +120,11 @@ fn main() {
     rearm_connect(pipe, &mut connect_ol, connect_event);
     println!("starship-daemon started on {}", starship_daemon::PIPE_NAME);
     loop {
-        let config_evt = config_watch.as_ref().map_or(std::ptr::null_mut(), |cw| cw.change_event);
-        let handles = [connect_event, config_evt];
-        let rc = unsafe { WaitForMultipleObjects(handles.len() as DWORD, handles.as_ptr(), 0, 0xFFFFFFFF) };
-        let idx = (rc - WAIT_OBJECT_0) as usize;
-        if idx == 0 {
-            let _ = handle_client(pipe, &mut module_config, &mut prompt_cache);
+        let handles = [connect_event];
+        let rc = unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, 0xFFFFFFFF) };
+        if (rc - WAIT_OBJECT_0) == 0 {
+            let _ = handle_client(pipe, &mut module_config, &mut prompt_cache, &config_path);
             rearm_connect(pipe, &mut connect_ol, connect_event);
-        } else if idx == 1 {
-            if let Some(ref mut cw) = config_watch {
-                if cw.check_event() {
-                    if let Some(new_cfg) = prompt::load_config(&config_path) { module_config = new_cfg; }
-                }
-            }
         }
     }
 }
@@ -279,7 +137,7 @@ fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
     else { unsafe { SetEvent(event); } }
 }
 
-fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<CacheKey, String>) -> Result<(), ()> {
+fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<prompt::CacheKey, String>, config_path: &Path) -> Result<(), ()> {
     let mut hdr = [0u8; 4];
     if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { unsafe { DisconnectNamedPipe(pipe); } return Err(()); }
     let cwd_len = u32::from_le_bytes(hdr) as usize;
@@ -308,7 +166,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
 
     let tb = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0);
     let tw = props.terminal_width.unwrap_or(120);
-    let ck = compute_cache_key(&cwd, status_code, &keymap, tw, tb);
+    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path);
 
     if let Some(cached) = prompt_cache.get(&ck) {
         send_response(pipe, cached);

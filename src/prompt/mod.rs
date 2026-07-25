@@ -14,10 +14,68 @@ pub struct RenderContext {
     pub keymap: String,
 }
 
+/// Cache key with mtime-based invalidation.
+/// Checks cwd mtime (file create/delete), .git/index mtime (git add/reset),
+/// and .git/HEAD mtime (branch switch/commit) to detect stale cache.
+#[derive(Hash, Eq, PartialEq, Clone)]
+pub struct CacheKey {
+    pub cwd: PathBuf,
+    pub status_code: i32,
+    pub keymap: String,
+    pub terminal_width: usize,
+    pub time_bucket: u64,
+    pub cwd_mtime: u64,
+    pub index_mtime: u64,
+    pub head_mtime: u64,
+    pub branch_mtime: u64,
+    pub remote_mtime: u64,
+    pub config_mtime: u64,
+}
+
+pub fn get_mtime_ns(p: &std::path::Path) -> u64 {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+fn get_branch_ref_mtimes(git_dir: &std::path::Path) -> (u64, u64) {
+    let head = git_dir.join("HEAD");
+    let content = std::fs::read_to_string(&head).ok();
+    let branch = content
+        .and_then(|s| s.strip_prefix("ref: refs/heads/").map(|s| s.trim().to_string()));
+    let branch_mtime = branch.as_ref()
+        .map(|b| get_mtime_ns(&git_dir.join("refs").join("heads").join(b)))
+        .unwrap_or(0);
+    let remote_mtime = branch.as_ref()
+        .map(|b| get_mtime_ns(&git_dir.join("refs").join("remotes").join("origin").join(b)))
+        .unwrap_or(0);
+    (branch_mtime, remote_mtime)
+}
+
+pub fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path) -> CacheKey {
+    let git_dir = crate::find_git_dir(cwd);
+    let (br_mtime, rr_mtime) = git_dir.as_ref().map(|d| get_branch_ref_mtimes(d)).unwrap_or((0, 0));
+    CacheKey {
+        cwd: cwd.clone(),
+        status_code,
+        keymap: keymap.to_string(),
+        terminal_width,
+        time_bucket,
+        cwd_mtime: get_mtime_ns(cwd),
+        index_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("index"))).unwrap_or(0),
+        head_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("HEAD"))).unwrap_or(0),
+        branch_mtime: br_mtime,
+        remote_mtime: rr_mtime,
+        config_mtime: get_mtime_ns(config_path),
+    }
+}
+
 /// Validate that a config file exists.
 pub fn load_config(path: &Path) -> Option<ModuleConfig> {
-    let _content = std::fs::read_to_string(path).ok()?;
-    Some(ModuleConfig { config_path: path.to_path_buf() })
+    if path.is_file() { Some(ModuleConfig { config_path: path.to_path_buf() }) } else { None }
 }
 
 /// Get default starship config path.

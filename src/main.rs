@@ -177,6 +177,7 @@ struct CacheKey {
     cwd: PathBuf,
     status_code: i32,
     keymap: String,
+    terminal_width: usize,
     time_bucket: u64,
     cwd_mtime: u64,
     index_mtime: u64,
@@ -192,11 +193,12 @@ fn get_mtime_ns(p: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, time_bucket: u64) -> CacheKey {
+fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64) -> CacheKey {
     CacheKey {
         cwd: cwd.clone(),
         status_code,
         keymap: keymap.to_string(),
+        terminal_width,
         time_bucket,
         cwd_mtime: get_mtime_ns(cwd),
         index_mtime: get_mtime_ns(&cwd.join(".git").join("index")),
@@ -268,8 +270,9 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
         }
     }
 
-    let tb = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 300).unwrap_or(0);
-    let ck = compute_cache_key(&cwd, status_code, &keymap, tb);
+    let tb = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0);
+    let tw = props.terminal_width.unwrap_or(120);
+    let ck = compute_cache_key(&cwd, status_code, &keymap, tw, tb);
 
     if let Some(cached) = prompt_cache.get(&ck) {
         let b = cached.as_bytes(); let l = (b.len() as u32).to_le_bytes();
@@ -278,7 +281,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
         return Ok(());
     }
 
-    let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
+    let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
     let output = prompt::render_prompt(&ctx);
     prompt_cache.insert(ck, output.clone());
 

@@ -8,11 +8,7 @@ name = "starship_daemon"
 path = "src/lib.rs"
 
 [dependencies]
-fast-git-status = { path = "../git-fast", features = ["daemon"] }
-starship = "1.26.0"
-toml_edit = "0.25"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+starship = "1"
 
 [[bin]]
 name = "starship-daemon"

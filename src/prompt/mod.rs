@@ -47,7 +47,11 @@ pub fn default_config_path() -> PathBuf {
 /// cache key is `current_dir`, so unique paths guarantee a cache miss and
 /// fresh git status on every prompt.
 pub fn render_prompt(ctx: &RenderContext) -> String {
-    let bust = ctx.cwd.join(".starship_bust").join(format!("{}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
+    // Use .git/bust/ as the unique path  -  it's inside the repo so gix discovers
+    // correctly, but it's under .git/ so gix doesn't report it as untracked.
+    let bust = ctx.cwd.join(".git").join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&bust);
 
     let mut properties = starship::context::Properties::default();
@@ -62,5 +66,6 @@ pub fn render_prompt(ctx: &RenderContext) -> String {
     sctx.width = ctx.terminal_width;
 
     let result = starship::print::get_prompt(&sctx);
+    let _ = std::fs::remove_dir_all(ctx.cwd.join(".git").join("bust"));
     result.trim_end_matches('\n').to_string()
 }

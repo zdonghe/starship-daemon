@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -118,14 +117,6 @@ impl ClientProps {
 
 // -- Prompt cache --------------------------------------------------------
 
-#[derive(Hash, Eq, PartialEq, Clone)]
-struct CacheKey {
-    cwd: PathBuf,
-    status_code: i32,
-    keymap: String,
-    time_bucket: u64,
-}
-
 // -- Config file watching ------------------------------------------------
 
 struct ConfigWatch {
@@ -183,7 +174,6 @@ fn main() {
         None => { eprintln!("Could not load config"); std::process::exit(1); }
     };
     let mut config_watch = ConfigWatch::new(&config_path);
-    let mut prompt_cache: HashMap<CacheKey, String> = HashMap::new();
     let wide = to_wide(starship_daemon::PIPE_NAME);
     let pipe = unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, 1, 65536, 65536, 0, std::ptr::null()) };
     if pipe == INVALID_HANDLE_VALUE { std::process::exit(0); }
@@ -199,12 +189,12 @@ fn main() {
         let rc = unsafe { WaitForMultipleObjects(handles.len() as DWORD, handles.as_ptr(), 0, 0xFFFFFFFF) };
         let idx = (rc - WAIT_OBJECT_0) as usize;
         if idx == 0 {
-            let _ = handle_client(pipe, &mut module_config, &mut prompt_cache);
+            let _ = handle_client(pipe, &mut module_config);
             rearm_connect(pipe, &mut connect_ol, connect_event);
         } else if idx == 1 {
             if let Some(ref mut cw) = config_watch {
                 if cw.check_event() {
-                    if let Some(new_cfg) = prompt::load_config(&config_path) { module_config = new_cfg; prompt_cache.clear(); }
+                    if let Some(new_cfg) = prompt::load_config(&config_path) { module_config = new_cfg; }
                 }
             }
         }
@@ -219,7 +209,7 @@ fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
     else { unsafe { SetEvent(event); } }
 }
 
-fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<CacheKey, String>) -> Result<(), ()> {
+fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig) -> Result<(), ()> {
     let mut hdr = [0u8; 4];
     if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { unsafe { DisconnectNamedPipe(pipe); } return Err(()); }
     let cwd_len = u32::from_le_bytes(hdr) as usize;
@@ -236,21 +226,12 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
     if let Some(ref req) = props.starship_config {
         let p = PathBuf::from(req);
         if p != module_config.config_path {
-            if let Some(new_cfg) = prompt::load_config(&p) { *module_config = new_cfg; prompt_cache.clear(); std::env::set_var("STARSHIP_CONFIG", req); }
+            if let Some(new_cfg) = prompt::load_config(&p) { *module_config = new_cfg; std::env::set_var("STARSHIP_CONFIG", req); }
         }
     }
-    let time_bucket = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 300).unwrap_or(0);
-    let ck = CacheKey { cwd: cwd.clone(), status_code, keymap: keymap.clone(), time_bucket };
-    if let Some(cached) = prompt_cache.get(&ck) {
-        let b = cached.as_bytes(); let l = (b.len() as u32).to_le_bytes();
-        write_all(pipe, &l); write_all(pipe, b);
-        unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
-        return Ok(());
-    }
-    
+
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
     let output = prompt::render_prompt(&ctx);
-    prompt_cache.insert(ck, output.clone());
     let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
     write_all(pipe, &l); write_all(pipe, b);
     unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }

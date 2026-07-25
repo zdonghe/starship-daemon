@@ -288,6 +288,14 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
             if let Some(new_cfg) = prompt::load_config(&p) { *module_config = new_cfg; std::env::set_var("STARSHIP_CONFIG", req); }
         }
     }
+    if std::env::var("STARSHIP_DAEMON_CACHE").map(|v| v == "0").unwrap_or(false) {
+        let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
+        let output = prompt::render_prompt(&ctx);
+        let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
+        write_all(pipe, &l); write_all(pipe, b);
+        unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
+        return Ok(());
+    }
 
     let tb = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0);
     let tw = props.terminal_width.unwrap_or(120);

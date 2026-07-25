@@ -248,6 +248,11 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
         unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
         return Ok(());
     }
+    // Pre-warm OS/Defender cache: read .git files so gix doesn't wait for Defender
+    let git_dir = cwd.join(".git");
+    let _ = std::fs::read(git_dir.join("HEAD"));
+    let _ = std::fs::read(git_dir.join("index"));
+
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
     let output = prompt::render_prompt(&ctx);
     prompt_cache.insert(ck, output.clone());

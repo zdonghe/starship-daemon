@@ -11,6 +11,7 @@ pub struct ModuleConfig {
     pub format: String,
     pub doc: DocumentMut,
     pub scan_timeout: u64,
+    pub config_path: PathBuf,
 }
 
 /// Per-request context
@@ -45,7 +46,7 @@ pub fn load_config(path: &Path) -> Option<ModuleConfig> {
     let format = doc["format"].as_str().unwrap_or("$character").to_string();
     let scan_timeout = doc["scan_timeout"].as_integer().unwrap_or(20) as u64;
 
-    Some(ModuleConfig { format, doc, scan_timeout })
+    Some(ModuleConfig { format, doc, scan_timeout, config_path: path.to_path_buf() })
 }
 
 /// Get default starship config path.

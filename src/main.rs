@@ -18,6 +18,7 @@ struct ClientProps {
     jobs: Option<i64>,
     shlvl: Option<i64>,
     terminal_width: Option<usize>,
+    starship_config: Option<String>,
 }
 
 // -- Prompt cache --------------------------------------------------------
@@ -248,7 +249,7 @@ fn main() {
 fn handle_client(
     pipe: HANDLE,
     repos: &mut Vec<RepoWatch>,
-    _module_config: &mut ModuleConfig,
+    module_config: &mut ModuleConfig,
     prompt_cache: &mut HashMap<CacheKey, String>,
 ) -> Result<(), ()> {
     let mut hdr = [0u8; 4];
@@ -281,6 +282,19 @@ fn handle_client(
     let jobs = props.jobs.unwrap_or(0);
     let shlvl = props.shlvl;
     let terminal_width = props.terminal_width.unwrap_or(120);
+
+    // Reload config if client requests a different one
+    if let Some(ref req_config) = props.starship_config {
+        let req_path = PathBuf::from(req_config);
+        if req_path != module_config.config_path {
+            if let Some(new_cfg) = prompt::load_config(&req_path) {
+                *module_config = new_cfg;
+                prompt_cache.clear();
+                // Update env so starship's internal get_prompt() uses the new config
+                std::env::set_var("STARSHIP_CONFIG", &req_path);
+            }
+        }
+    }
 
     // Check prompt cache
     let time_bucket = std::time::SystemTime::now()

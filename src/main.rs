@@ -296,7 +296,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
     if let Some(ref req) = props.starship_config {
         let p = PathBuf::from(req);
         if p != module_config.config_path {
-            if let Some(new_cfg) = prompt::load_config(&p) { *module_config = new_cfg; std::env::set_var("STARSHIP_CONFIG", req); }
+            if let Some(new_cfg) = prompt::load_config(&p) { *module_config = new_cfg; prompt_cache.clear(); std::env::set_var("STARSHIP_CONFIG", req); }
         }
     }
     if std::env::var("STARSHIP_DAEMON_CACHE").map(|v| v == "0").unwrap_or(false) {

@@ -5,8 +5,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\starship-daemon";
 pub mod prompt;
 
 pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
-    let mut dir = Some(cwd);
-    while let Some(d) = dir {
+    for d in cwd.ancestors() {
         let dot_git = d.join(".git");
         if dot_git.is_dir() {
             return Some(dot_git);
@@ -21,7 +20,6 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
             };
             return Some(abs);
         }
-        dir = d.parent();
     }
     None
 }

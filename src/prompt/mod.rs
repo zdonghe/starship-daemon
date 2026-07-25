@@ -55,11 +55,11 @@ fn get_branch_ref_mtimes(git_dir: &std::path::Path) -> (u64, u64) {
     (branch_mtime, remote_mtime)
 }
 
-pub fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path) -> CacheKey {
+pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path) -> CacheKey {
     let git_dir = crate::find_git_dir(cwd);
     let (br_mtime, rr_mtime) = git_dir.as_ref().map(|d| get_branch_ref_mtimes(d)).unwrap_or((0, 0));
     CacheKey {
-        cwd: cwd.clone(),
+        cwd: cwd.to_path_buf(),
         status_code,
         keymap: keymap.to_string(),
         terminal_width,

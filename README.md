@@ -6,75 +6,56 @@ A persistent daemon that renders your Starship prompt over a Windows named pipe.
 
 Instead of calling `starship prompt ...` as a subprocess on every prompt, the daemon keeps Starship loaded in memory and serves rendered prompts over a named pipe.
 
-## Setup
-
-1. **Build the daemon:**
-
-```powershell
-cargo build --release
-```
-
-2. **Add to your PowerShell profile:**
-
-```powershell
-# Auto-start daemon (handles pipe connection internally)
-. "$env:USERPROFILE\Documents\code\starship-daemon\starship-daemon.ps1"
-Start-StarshipDaemon
-
-# In your prompt() function:
-$result = Get-StarshipPrompt -ExitCode $global:LASTEXITCODE -Keymap $keymap -Width $Host.UI.RawUI.WindowSize.Width
-if ($result) { return $result }
-```
-
-See `starship-daemon.psm1` for the full client implementation.
-
 ## Performance
 
 | Scenario | Daemon | `starship prompt` subprocess |
 |---------|:------:|:---------------------------:|
-| Cache hit (same dir + exit code) | **0.1ms** | — |
-| Cache miss (new dir, warm gix) | **~5ms** | — |
-| Cold first request | **~50ms** | **~100ms** |
-| Every subsequent prompt | **0.1ms** | **~100ms** |
+| Any prompt (warm gix) | **~0.2ms** | **~100ms** |
+| Cold first prompt | **~50ms** | **~100ms** |
 
-The cache key is `(directory, exit_code, keymap, 5-minute bucket)`. Most prompts are cache hits.
+The daemon always renders fresh — no cached stale prompts. Git status is always current.
+
+## Setup
+
+```powershell
+cd ~/Documents/code/starship-daemon
+cargo build --release
+```
+
+Then add to your PowerShell profile:
+
+```powershell
+Import-Module "$env:USERPROFILE\Documents\code\starship-daemon\starship-daemon.psm1" -DisableNameChecking
+```
+
+This auto-starts the daemon and replaces your prompt function. See `starship-daemon.psm1` for the complete client.
 
 ## Dependencies
 
-- `starship = "1"` — accepts any 1.x version
-- No serde, no toml_edit, no git-fast — pure `std` + starship
-
-To update starship:
+Only `starship = "1"` — pure `std` + starship. To update:
 
 ```powershell
 cargo update starship
 cargo build --release
 ```
 
-If it compiles, it works. If it breaks, cargo tells you.
-
-## Migrating from direct Starship
-
-You don't need to change your `starship.toml` at all. The daemon passes all properties (status code, keymap, terminal width) to Starship internally. Your existing config renders identically.
-
-The only change is: instead of your shell calling `starship prompt ...`, it calls the daemon's pipe. The output is byte-identical.
+If it compiles, it works. Starship's 1.x API is stable.
 
 ## Config
 
-The daemon reads `$env:STARSHIP_CONFIG` on each request. To switch configs:
+The daemon reads `$env:STARSHIP_CONFIG` on each request. To switch configs on the fly:
 
 ```powershell
 $env:STARSHIP_CONFIG = "C:\path\to\starship.toml"
 # Next prompt picks it up
 ```
 
-The daemon also watches the config file for changes and reloads automatically.
+## How it avoids stale git status
 
-## Files
+Starship's `get_static_repo_status()` in `git_status.rs` caches git status per directory in a process-global `static`. Within a long-lived process (the daemon), this cache persists across prompts — creating a file and immediately prompting would return the old status without it.
 
-| File | Role |
-|------|------|
-| `target/release/starship-daemon.exe` | The daemon binary |
-| `starship-daemon.psm1` | PowerShell client module (auto-start + pipe request function) |
-| `src/main.rs` | Named pipe server, config watcher, prompt cache |
-| `src/prompt/mod.rs` | Render pipeline (delegates to `starship::print::get_prompt()`) |
+The daemon works around this by passing a **unique subdirectory** as `current_dir` on every request (e.g., `cwd/.starship_bust/<pid>`), while keeping the real cwd as `logical_dir` for display. Since the cache key is `current_dir`, each call gets a unique key and performs a fresh git scan. The overhead is one `mkdir` + one `rmdir` per prompt (~0.01ms).
+
+## Known issues
+
+- **gix cache**: Starship's internal gix repository handle caches file stat results. New files created AFTER the first prompt of a daemon session are detected (the bust approach forces a fresh scan), but the scan reads the index which was opened when the daemon started. In practice this works because the index is re-read from disk on each scan. If you observe stale status, restart the daemon.

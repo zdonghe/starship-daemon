@@ -64,6 +64,12 @@ fn free_buf(p: *mut u8) { unsafe { HeapFree(GetProcessHeap(), 0, p as LPVOID); }
 fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
     unsafe { let mut r: DWORD = 0; ReadFile(pipe, buf.as_mut_ptr() as LPVOID, buf.len() as DWORD, &mut r, std::ptr::null_mut()) != 0 && r == buf.len() as DWORD }
 }
+fn send_response(pipe: HANDLE, output: &str) {
+    let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
+    write_all(pipe, &l); write_all(pipe, b);
+    unsafe { DisconnectNamedPipe(pipe); }
+}
+
 fn write_all(pipe: HANDLE, buf: &[u8]) -> bool {
     unsafe { let mut w: DWORD = 0; WriteFile(pipe, buf.as_ptr() as LPCVOID, buf.len() as DWORD, &mut w, std::ptr::null_mut()) != 0 }
 }
@@ -291,9 +297,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
     if std::env::var("STARSHIP_DAEMON_CACHE").map(|v| v == "0").unwrap_or(false) {
         let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
         let output = prompt::render_prompt(&ctx);
-        let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
-        write_all(pipe, &l); write_all(pipe, b);
-        unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
+        send_response(pipe, &output);
         return Ok(());
     }
 
@@ -302,9 +306,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
     let ck = compute_cache_key(&cwd, status_code, &keymap, tw, tb);
 
     if let Some(cached) = prompt_cache.get(&ck) {
-        let b = cached.as_bytes(); let l = (b.len() as u32).to_le_bytes();
-        write_all(pipe, &l); write_all(pipe, b);
-        unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
+        send_response(pipe, cached);
         return Ok(());
     }
 
@@ -314,9 +316,6 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
     let output = prompt::render_prompt(&ctx);
     prompt_cache.insert(ck, output.clone());
-
-    let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
-    write_all(pipe, &l); write_all(pipe, b);
-    unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
+    send_response(pipe, &output);
     Ok(())
 }

@@ -203,20 +203,25 @@ fn get_mtime_ns(p: &std::path::Path) -> u64 {
 
 /// Get mtime of the current branch ref and its remote tracking ref.
 fn get_branch_ref_mtimes(cwd: &PathBuf) -> (u64, u64) {
-    let head = cwd.join(".git").join("HEAD");
+    let git_dir = match starship_daemon::find_git_dir(cwd) {
+        Some(d) => d,
+        None => return (0, 0),
+    };
+    let head = git_dir.join("HEAD");
     let content = std::fs::read_to_string(&head).ok();
     let branch = content
         .and_then(|s| s.strip_prefix("ref: refs/heads/").map(|s| s.trim().to_string()));
     let branch_mtime = branch.as_ref()
-        .map(|b| get_mtime_ns(&cwd.join(".git").join("refs").join("heads").join(b)))
+        .map(|b| get_mtime_ns(&git_dir.join("refs").join("heads").join(b)))
         .unwrap_or(0);
     let remote_mtime = branch.as_ref()
-        .map(|b| get_mtime_ns(&cwd.join(".git").join("refs").join("remotes").join("origin").join(b)))
+        .map(|b| get_mtime_ns(&git_dir.join("refs").join("remotes").join("origin").join(b)))
         .unwrap_or(0);
     (branch_mtime, remote_mtime)
 }
 fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64) -> CacheKey {
     let (br_mtime, rr_mtime) = get_branch_ref_mtimes(cwd);
+    let git_dir = starship_daemon::find_git_dir(cwd);
     CacheKey {
         cwd: cwd.clone(),
         status_code,
@@ -224,8 +229,8 @@ fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_wid
         terminal_width,
         time_bucket,
         cwd_mtime: get_mtime_ns(cwd),
-        index_mtime: get_mtime_ns(&cwd.join(".git").join("index")),
-        head_mtime: get_mtime_ns(&cwd.join(".git").join("HEAD")),
+        index_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("index"))).unwrap_or(0),
+        head_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("HEAD"))).unwrap_or(0),
         branch_mtime: br_mtime,
         remote_mtime: rr_mtime,
     }
@@ -310,9 +315,6 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
         return Ok(());
     }
 
-    // On time-only miss: same key as cache but without time_bucket.
-    // We still need to render fresh time, but can avoid full get_prompt().
-    // For now, always render full prompt   the ~5ms warm cost is acceptable.
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
     let output = prompt::render_prompt(&ctx);
     prompt_cache.insert(ck, output.clone());

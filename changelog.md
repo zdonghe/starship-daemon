@@ -9,3 +9,5 @@ optimize perf, cold launch perf
 fix the red colour of error code persisting
 
 make it so config reloads on starship_config environment variable set
+
+llm changes doesn't result in git status update?

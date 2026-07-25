@@ -8,7 +8,7 @@ name = "starship_daemon"
 path = "src/lib.rs"
 
 [dependencies]
-starship = "1"
+starship = { version = "1", default-features = false }
 
 [[bin]]
 name = "starship-daemon"
@@ -20,3 +20,10 @@ codegen-units = 1
 opt-level = "z"
 panic = "abort"
 strip = true
+
+# Fast dev deployment: inherits release settings but trades some runtime perf
+# for faster compile. Use: cargo build --profile fast-release
+[profile.fast-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

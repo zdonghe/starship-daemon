@@ -8,6 +8,13 @@ optimize perf, cold launch perf
 
 fix the red colour of error code persisting
 
-make it so config reloads on starship_config environment variable set
-
 llm changes doesn't result in git status update?
+
+currently working on implementing the git dir walk
+- manual or gix?
+
+config hot watch live reload (cache invalidation on hotreload change?)
+- just going to do a syscall to check mtime
+- need to ensure the syscall actually calls the starship_config location
+
+speed up compile time

@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-
 /// Minimal config wrapper — just tracks path for reload detection.
 #[derive(Debug)]
 pub struct ModuleConfig {
@@ -41,25 +40,16 @@ pub fn default_config_path() -> PathBuf {
 }
 
 /// Render the full prompt using starship's native pipeline.
-/// Full prompt caching per (cwd, status_code, keymap, time_bucket) avoids
-/// re-rendering entirely on the hot path.
-/// Render the full prompt using starship's native pipeline.
 ///
-/// Starship caches git status per directory path in a process-global static.
-/// Rendering from a subdirectory before the real render forces a fresh scan.
-/// Render the full prompt using starship's native pipeline.
-///
-/// Starship caches git status per directory in a process-global static.
-/// The cache key is `current_dir`, while the display uses `logical_dir`.
-/// By passing a unique `current_dir` (with a random suffix) and the real
-/// path as `logical_dir`, every call gets a cache miss and fresh git status.
-/// Render the full prompt using starship's native pipeline.
-///
-/// Starship caches git status per directory in a process-global static.
-/// The cache key is `current_dir`. Every call uses a unique subdirectory
-/// as `current_dir` and the real cwd as `logical_dir`. This guarantees a
-/// cache miss and fresh git status on every call.
+/// Starship caches git status per `current_dir` in a process-global static
+/// (`get_static_repo_status` in git_status.rs). Every call uses a unique
+/// subdirectory as `current_dir` and the real cwd as `logical_dir`. The
+/// cache key is `current_dir`, so unique paths guarantee a cache miss and
+/// fresh git status on every prompt.
 pub fn render_prompt(ctx: &RenderContext) -> String {
+    let bust = ctx.cwd.join(".starship_bust").join(format!("{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&bust);
+
     let mut properties = starship::context::Properties::default();
     properties.status_code = Some(ctx.status_code.to_string());
     properties.keymap = ctx.keymap.clone();
@@ -67,7 +57,7 @@ pub fn render_prompt(ctx: &RenderContext) -> String {
     let env = starship::context::Env::default();
     let mut sctx = starship::context::Context::new_with_shell_and_path(
         properties, starship::context::Shell::Pwsh, starship::context::Target::Main,
-        ctx.cwd.clone(), ctx.cwd.clone(), env,
+        bust, ctx.cwd.clone(), env,
     );
     sctx.width = ctx.terminal_width;
 

@@ -182,6 +182,8 @@ struct CacheKey {
     cwd_mtime: u64,
     index_mtime: u64,
     head_mtime: u64,
+    branch_mtime: u64,
+    remote_mtime: u64,
 }
 
 fn get_mtime_ns(p: &std::path::Path) -> u64 {
@@ -193,7 +195,25 @@ fn get_mtime_ns(p: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Get mtime of the current branch ref and its remote tracking ref.
+/// Needed to detect `git push` which updates refs/remotes/ but not HEAD or index.
+fn get_branch_ref_mtimes(cwd: &PathBuf) -> (u64, u64) {
+    let head = cwd.join(".git").join("HEAD");
+    let head_content = std::fs::read_to_string(&head).ok();
+    let branch_ref = head_content
+        .and_then(|s| s.strip_prefix("ref: refs/heads/").map(|s| s.trim().to_string()));
+    
+    let branch_mtime = branch_ref.as_ref()
+        .map(|b| get_mtime_ns(&cwd.join(".git").join("refs").join("heads").join(b)))
+        .unwrap_or(0);
+    let remote_mtime = branch_ref.as_ref()
+        .map(|b| get_mtime_ns(&cwd.join(".git").join("refs").join("remotes").join("origin").join(b)))
+        .unwrap_or(0);
+    (branch_mtime, remote_mtime)
+}
+
 fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64) -> CacheKey {
+    let (br_mtime, rr_mtime) = get_branch_ref_mtimes(cwd);
     CacheKey {
         cwd: cwd.clone(),
         status_code,
@@ -203,6 +223,8 @@ fn compute_cache_key(cwd: &PathBuf, status_code: i32, keymap: &str, terminal_wid
         cwd_mtime: get_mtime_ns(cwd),
         index_mtime: get_mtime_ns(&cwd.join(".git").join("index")),
         head_mtime: get_mtime_ns(&cwd.join(".git").join("HEAD")),
+        branch_mtime: br_mtime,
+        remote_mtime: rr_mtime,
     }
 }
 

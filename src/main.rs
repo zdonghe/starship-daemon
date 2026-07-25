@@ -22,6 +22,8 @@ const PIPE_TYPE_MESSAGE: DWORD = 4;
 const PIPE_WAIT: DWORD = 0;
 const WAIT_OBJECT_0: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
+const CACHE_TTL_MINUTES: u64 = 2;
+const CACHE_MAX_ENTRIES: usize = 10000;
 
 #[repr(C)]
 struct OVERLAPPED {
@@ -41,6 +43,8 @@ extern "system" {
     fn FlushFileBuffers(h: HANDLE) -> BOOL;
     fn GetLastError() -> DWORD;
 }
+
+macro_rules! bail { ($p:expr) => { unsafe { DisconnectNamedPipe($p); return Err(()); } } }
 
 fn to_wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() }
 fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
@@ -142,6 +146,14 @@ fn main() {
 }
 
 
+fn current_minute() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0)
+}
+fn evict_stale(cache: &mut HashMap<prompt::CacheKey, String>) {
+    let cutoff = current_minute().saturating_sub(CACHE_TTL_MINUTES);
+    cache.retain(|k, _| k.time_bucket > cutoff);
+}
+
 fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
     unsafe { *ol = mem::zeroed(); ol.h_event = event; ResetEvent(event); }
     let ret = unsafe { ConnectNamedPipe(pipe, ol as *mut _ as *mut c_void) };
@@ -151,16 +163,16 @@ fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
 
 fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
     let mut hdr = [0u8; 4];
-    if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { unsafe { DisconnectNamedPipe(pipe); } return Err(()); }
+    if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { bail!(pipe); }
     let cwd_len = u32::from_le_bytes(hdr) as usize;
     let mut cwd_bytes = vec![0u8; cwd_len];
-    if !read_exact(pipe, &mut cwd_bytes) { unsafe { DisconnectNamedPipe(pipe); } return Err(()); }
-    if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 4096 { unsafe { DisconnectNamedPipe(pipe); } return Err(()); }
+    if !read_exact(pipe, &mut cwd_bytes) { bail!(pipe); }
+    if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 4096 { bail!(pipe); }
     let props_len = u32::from_le_bytes(hdr) as usize;
     let mut props_bytes = vec![0u8; props_len];
-    if !read_exact(pipe, &mut props_bytes) { unsafe { DisconnectNamedPipe(pipe); } return Err(()); }
+    if !read_exact(pipe, &mut props_bytes) { bail!(pipe); }
     let cwd = PathBuf::from(String::from_utf8_lossy(&cwd_bytes).as_ref());
-    let props: ClientProps = match ClientProps::parse_json(&props_bytes) { Some(p) => p, None => { unsafe { DisconnectNamedPipe(pipe); } return Err(()); } };
+    let props: ClientProps = match ClientProps::parse_json(&props_bytes) { Some(p) => p, None => { bail!(pipe); } };
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
     if let Some(ref req) = props.starship_config {
@@ -176,7 +188,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
         return Ok(());
     }
 
-    let tb = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0);
+    let tb = current_minute();
     let tw = props.terminal_width.unwrap_or(120);
     let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, &module_config.config_path);
 
@@ -188,6 +200,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
     let output = prompt::render_prompt(&ctx);
     prompt_cache.insert(ck, output.clone());
+    if prompt_cache.len() >= CACHE_MAX_ENTRIES { evict_stale(prompt_cache); }
     send_response(pipe, &output);
     Ok(())
 }

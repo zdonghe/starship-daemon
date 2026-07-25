@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-
 use starship::context::{Context as StarshipContext, Properties, Shell, Target};
 use starship::print;
 
@@ -44,7 +43,6 @@ pub fn default_config_path() -> PathBuf {
 }
 
 /// Render the full prompt using starship's native pipeline.
-/// git-fast watchers keep gix caches warm so the internal gix scan is fast.
 /// Full prompt caching per (cwd, status_code, keymap, time_bucket) avoids
 /// re-rendering entirely on the hot path.
 pub fn render_prompt(ctx: &RenderContext) -> String {

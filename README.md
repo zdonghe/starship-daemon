@@ -1,6 +1,6 @@
 # starship-daemon
 
-A persistent daemon that renders your Starship prompt over a Windows named pipe.
+A persistent daemon that renders your Starship prompt over a Windows named pipe. Intended as a drop-in replacement for Starship.
 
 ## How it works
 

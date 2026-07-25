@@ -29,7 +29,6 @@ const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x02000000;
 const FILE_NOTIFY_CHANGE_FILE_NAME: DWORD = 1;
 const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
 const WAIT_OBJECT_0: DWORD = 0;
-const WAIT_TIMEOUT: DWORD = 0x00000102;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
 const CHANGE_BUF_SIZE: u32 = 65536;
 
@@ -171,7 +170,6 @@ impl Drop for ConfigWatch {
     fn drop(&mut self) {
         unsafe {
             if self.dir_handle != INVALID_HANDLE_VALUE { CloseHandle(self.dir_handle); }
-            if self.dir_handle != INVALID_HANDLE_VALUE { CloseHandle(self.dir_handle); }
             if !self.change_buf.is_null() { free_buf(self.change_buf); }
             CloseHandle(self.change_event);
         }
@@ -193,23 +191,16 @@ fn main() {
     let mut connect_ol: OVERLAPPED = unsafe { mem::zeroed() };
 
     // Issue initial connect
-    unsafe { *&mut connect_ol = mem::zeroed(); connect_ol.h_event = connect_event; ResetEvent(connect_event); }
-    let ret = unsafe { ConnectNamedPipe(pipe, &mut connect_ol as *mut _ as *mut c_void) };
-    if ret == 0 { let err = unsafe { GetLastError() }; if err == ERROR_PIPE_CONNECTED { unsafe { SetEvent(connect_event); } } }
-    else { unsafe { SetEvent(connect_event); } }
+    rearm_connect(pipe, &mut connect_ol, connect_event);
     println!("starship-daemon started on {}", starship_daemon::PIPE_NAME);
     loop {
         let config_evt = config_watch.as_ref().map_or(std::ptr::null_mut(), |cw| cw.change_event);
         let handles = [connect_event, config_evt];
         let rc = unsafe { WaitForMultipleObjects(handles.len() as DWORD, handles.as_ptr(), 0, 0xFFFFFFFF) };
-        if rc == WAIT_TIMEOUT { continue; }
         let idx = (rc - WAIT_OBJECT_0) as usize;
         if idx == 0 {
             let _ = handle_client(pipe, &mut module_config, &mut prompt_cache);
-            unsafe { *&mut connect_ol = mem::zeroed(); connect_ol.h_event = connect_event; ResetEvent(connect_event); }
-            let ret = unsafe { ConnectNamedPipe(pipe, &mut connect_ol as *mut _ as *mut c_void) };
-            if ret == 0 { let err = unsafe { GetLastError() }; if err == ERROR_PIPE_CONNECTED { unsafe { SetEvent(connect_event); } } }
-            else { unsafe { SetEvent(connect_event); } }
+            rearm_connect(pipe, &mut connect_ol, connect_event);
         } else if idx == 1 {
             if let Some(ref mut cw) = config_watch {
                 if cw.check_event() {
@@ -218,6 +209,14 @@ fn main() {
             }
         }
     }
+}
+
+
+fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
+    unsafe { *ol = mem::zeroed(); ol.h_event = event; ResetEvent(event); }
+    let ret = unsafe { ConnectNamedPipe(pipe, ol as *mut _ as *mut c_void) };
+    if ret == 0 { let err = unsafe { GetLastError() }; if err == ERROR_PIPE_CONNECTED { unsafe { SetEvent(event); } } }
+    else { unsafe { SetEvent(event); } }
 }
 
 fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<CacheKey, String>) -> Result<(), ()> {
@@ -240,18 +239,14 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
             if let Some(new_cfg) = prompt::load_config(&p) { *module_config = new_cfg; prompt_cache.clear(); std::env::set_var("STARSHIP_CONFIG", req); }
         }
     }
-    let tb = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 300).unwrap_or(0);
-    let ck = CacheKey { cwd: cwd.clone(), status_code, keymap: keymap.clone(), time_bucket: tb };
+    let time_bucket = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 300).unwrap_or(0);
+    let ck = CacheKey { cwd: cwd.clone(), status_code, keymap: keymap.clone(), time_bucket };
     if let Some(cached) = prompt_cache.get(&ck) {
         let b = cached.as_bytes(); let l = (b.len() as u32).to_le_bytes();
         write_all(pipe, &l); write_all(pipe, b);
         unsafe { let mut d = [0u8; 4]; let mut r: DWORD = 0; ReadFile(pipe, d.as_mut_ptr() as LPVOID, 4, &mut r, std::ptr::null_mut()); DisconnectNamedPipe(pipe); }
         return Ok(());
     }
-    // Pre-warm OS/Defender cache: read .git files so gix doesn't wait for Defender
-    let git_dir = cwd.join(".git");
-    let _ = std::fs::read(git_dir.join("HEAD"));
-    let _ = std::fs::read(git_dir.join("index"));
     
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
     let output = prompt::render_prompt(&ctx);

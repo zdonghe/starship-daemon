@@ -81,8 +81,7 @@ pub fn load_config(path: &Path) -> Option<ModuleConfig> {
 /// Get default starship config path.
 pub fn default_config_path() -> PathBuf {
     if let Ok(cfg) = std::env::var("STARSHIP_CONFIG") {
-        let p = PathBuf::from(cfg);
-        if p.exists() { return p; }
+        return PathBuf::from(cfg);
     }
     std::env::var("USERPROFILE")
         .map(|h| PathBuf::from(h).join(".config").join("starship.toml"))

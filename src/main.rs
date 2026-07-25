@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use starship_daemon::prompt::{self, ModuleConfig, RenderContext};
 
@@ -38,6 +38,7 @@ extern "system" {
     fn WaitForMultipleObjects(count: DWORD, handles: *const HANDLE, wait_all: BOOL, ms: DWORD) -> DWORD;
     fn ResetEvent(h: HANDLE) -> BOOL;
     fn SetEvent(h: HANDLE) -> BOOL;
+    fn FlushFileBuffers(h: HANDLE) -> BOOL;
     fn GetLastError() -> DWORD;
 }
 
@@ -48,7 +49,7 @@ fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
 fn send_response(pipe: HANDLE, output: &str) {
     let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
     write_all(pipe, &l); write_all(pipe, b);
-    unsafe { DisconnectNamedPipe(pipe); }
+    unsafe { FlushFileBuffers(pipe); DisconnectNamedPipe(pipe); }
 }
 
 fn write_all(pipe: HANDLE, buf: &[u8]) -> bool {
@@ -116,14 +117,25 @@ fn main() {
     let connect_event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
     let mut connect_ol: OVERLAPPED = unsafe { mem::zeroed() };
 
-    // Issue initial connect
     rearm_connect(pipe, &mut connect_ol, connect_event);
     println!("starship-daemon started on {}", starship_daemon::PIPE_NAME);
+
+    // Pre-warm: render once to initialize starship's lazy modules and caches
+    {
+        let warm_ctx = RenderContext {
+            cwd: PathBuf::from("."),
+            terminal_width: 120,
+            status_code: 0,
+            keymap: "vi".to_string(),
+        };
+        let _ = prompt::render_prompt(&warm_ctx);
+    }
+
     loop {
         let handles = [connect_event];
         let rc = unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, 0xFFFFFFFF) };
         if (rc - WAIT_OBJECT_0) == 0 {
-            let _ = handle_client(pipe, &mut module_config, &mut prompt_cache, &config_path);
+            let _ = handle_client(pipe, &mut module_config, &mut prompt_cache);
             rearm_connect(pipe, &mut connect_ol, connect_event);
         }
     }
@@ -137,7 +149,7 @@ fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
     else { unsafe { SetEvent(event); } }
 }
 
-fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<prompt::CacheKey, String>, config_path: &Path) -> Result<(), ()> {
+fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
     let mut hdr = [0u8; 4];
     if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { unsafe { DisconnectNamedPipe(pipe); } return Err(()); }
     let cwd_len = u32::from_le_bytes(hdr) as usize;
@@ -166,7 +178,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
 
     let tb = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0);
     let tw = props.terminal_width.unwrap_or(120);
-    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path);
+    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, &module_config.config_path);
 
     if let Some(cached) = prompt_cache.get(&ck) {
         send_response(pipe, cached);

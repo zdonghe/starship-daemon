@@ -11,9 +11,16 @@ path = "src/lib.rs"
 starship = { version = "1", default-features = false }
 toml = "1"
 
+[dev-dependencies]
+gix = { version = "=0.85.0", features = ["max-performance-safe", "status", "revision"] }
+
 [[bin]]
 name = "starship-daemon"
 path = "src/main.rs"
+
+[patch.crates-io]
+# starship = { git = "https://github.com/zdonghe/starship", branch = "gix-native" }
+starship = { path = "C:/Users/Dong/.cargo/git/checkouts/starship-56ef63aea5372fed/2557833" }
 
 [profile.release]
 lto = "fat"

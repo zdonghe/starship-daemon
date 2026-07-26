@@ -29,8 +29,6 @@ no cache perf still poor
 
 multiline statements look kinda off?
 
-One thing worth flagging in the cached numbers
-
 Max is 8.32ms against a median of 1.09ms — that's a ~7.6x ratio, way more elongated than your no-cache max/median ratio (~1.4x).
 Possibilities:
 Occasional cache invalidation/miss firing mid-run (e.g. if something touches $script:LastStarshipConfig state or a timestamp-based cache check occasionally fails)
@@ -77,3 +75,6 @@ Running them concurrently (thread pool / async tasks) can cut wall time down to 
 
 Is diff/ahead-behind calculation happening even when the user's config doesn't display it? Skipping unused segments based on the parsed starship.toml config (rather than computing everything and discarding) avoids wasted work.
 
+in starship config file, manually disable a ton of features that are not used
+
+push gix change to starship?

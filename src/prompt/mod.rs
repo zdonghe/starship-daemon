@@ -1,11 +1,5 @@
 use std::path::{Path, PathBuf};
 
-/// Minimal config wrapper — just tracks path for reload detection.
-#[derive(Debug)]
-pub struct ModuleConfig {
-    pub config_path: PathBuf,
-}
-
 /// Per-request context
 pub struct RenderContext {
     pub cwd: PathBuf,
@@ -74,8 +68,8 @@ pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_wi
 }
 
 /// Validate that a config file exists.
-pub fn load_config(path: &Path) -> Option<ModuleConfig> {
-    if path.is_file() { Some(ModuleConfig { config_path: path.to_path_buf() }) } else { None }
+pub fn load_config(path: &Path) -> Option<PathBuf> {
+    if path.is_file() { Some(path.to_path_buf()) } else { None }
 }
 
 /// Get default starship config path.
@@ -99,11 +93,11 @@ pub fn render_prompt(ctx: &RenderContext) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let (current_dir, cleanup) = match crate::find_git_dir(&ctx.cwd) {
+    let (current_dir, bust_dir) = match crate::find_git_dir(&ctx.cwd) {
         Some(git_dir) => {
             let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
             let _ = std::fs::create_dir_all(&bust);
-            (bust, Some(git_dir))
+            (bust.clone(), Some(bust))
         }
         None => (ctx.cwd.clone(), None),
     };
@@ -120,8 +114,8 @@ pub fn render_prompt(ctx: &RenderContext) -> String {
     sctx.width = ctx.terminal_width;
 
     let result = starship::print::get_prompt(&sctx);
-    if let Some(git_dir) = cleanup {
-        let _ = std::fs::remove_dir_all(git_dir.join("bust"));
+    if let Some(dir) = bust_dir {
+        let _ = std::fs::remove_dir_all(dir);
     }
     result.trim_end_matches('\n').to_string()
 }

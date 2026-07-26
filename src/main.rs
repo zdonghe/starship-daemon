@@ -3,7 +3,7 @@ use std::ffi::c_void;
 use std::mem;
 use std::path::PathBuf;
 
-use starship_daemon::prompt::{self, ModuleConfig, RenderContext};
+use starship_daemon::prompt::{self, RenderContext};
 
 // -- Win32 FFI for named pipe -------------------
 
@@ -30,7 +30,7 @@ struct OVERLAPPED {
     internal: usize, internal_high: usize, offset: DWORD, offset_high: DWORD, h_event: HANDLE,
 }
 
-extern "system" {
+unsafe extern "system" {
     fn CreateNamedPipeW(name: LPCWSTR, open_mode: DWORD, pipe_mode: DWORD, max_inst: DWORD, out_buf: DWORD, in_buf: DWORD, timeout: DWORD, sec: *const c_void) -> HANDLE;
     fn ConnectNamedPipe(h: HANDLE, overlapped: *mut c_void) -> BOOL;
     fn DisconnectNamedPipe(h: HANDLE) -> BOOL;
@@ -110,8 +110,8 @@ impl ClientProps {
 
 fn main() {
     let config_path = prompt::default_config_path();
-    let mut module_config = match prompt::load_config(&config_path) {
-        Some(cfg) => cfg,
+    let mut config_path = match prompt::load_config(&config_path) {
+        Some(p) => p,
         None => { eprintln!("Could not load config"); std::process::exit(1); }
     };
     let mut prompt_cache: HashMap<prompt::CacheKey, String> = HashMap::new();
@@ -139,7 +139,7 @@ fn main() {
         let handles = [connect_event];
         let rc = unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, 0xFFFFFFFF) };
         if (rc - WAIT_OBJECT_0) == 0 {
-            let _ = handle_client(pipe, &mut module_config, &mut prompt_cache);
+            let _ = handle_client(pipe, &mut config_path, &mut prompt_cache);
             rearm_connect(pipe, &mut connect_ol, connect_event);
         }
     }
@@ -161,7 +161,7 @@ fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
     else { unsafe { SetEvent(event); } }
 }
 
-fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
+fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
     let mut hdr = [0u8; 4];
     if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { bail!(pipe); }
     let cwd_len = u32::from_le_bytes(hdr) as usize;
@@ -177,8 +177,8 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
     if let Some(ref req) = props.starship_config {
         let p = PathBuf::from(req);
-        if p != module_config.config_path {
-            if let Some(new_cfg) = prompt::load_config(&p) { *module_config = new_cfg; prompt_cache.clear(); std::env::set_var("STARSHIP_CONFIG", req); }
+        if p != *config_path {
+            if let Some(new_cfg) = prompt::load_config(&p) { *config_path = new_cfg; prompt_cache.clear(); unsafe { std::env::set_var("STARSHIP_CONFIG", req); } }
         }
     }
     if std::env::var("STARSHIP_DAEMON_CACHE").map(|v| v == "0").unwrap_or(false) {
@@ -190,7 +190,7 @@ fn handle_client(pipe: HANDLE, module_config: &mut ModuleConfig, prompt_cache: &
 
     let tb = current_minute();
     let tw = props.terminal_width.unwrap_or(120);
-    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, &module_config.config_path);
+    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path);
 
     if let Some(cached) = prompt_cache.get(&ck) {
         send_response(pipe, cached);

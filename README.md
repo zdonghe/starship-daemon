@@ -19,6 +19,8 @@ Import-Module "c:\path\to\starship-daemon.psm1" -DisableNameChecking
 
 This auto-starts the daemon and replaces your prompt function. See `starship-daemon.psm1` for the complete client.
 
+todo: make the module actually plug and play, instead of requiring edits to the prompt function aswell
+
 ## Config
 
 The daemon reads `$env:STARSHIP_CONFIG` on each request. To switch configs on the fly:

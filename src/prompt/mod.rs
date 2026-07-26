@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-/// Per-request context
 pub struct RenderContext {
     pub cwd: PathBuf,
     pub terminal_width: usize,
@@ -72,7 +71,6 @@ pub fn load_config(path: &Path) -> Option<PathBuf> {
     if path.is_file() { Some(path.to_path_buf()) } else { None }
 }
 
-/// Get default starship config path.
 pub fn default_config_path() -> PathBuf {
     if let Ok(cfg) = std::env::var("STARSHIP_CONFIG") {
         return PathBuf::from(cfg);
@@ -129,7 +127,7 @@ pub fn read_config(path: &Path) -> toml::Table {
 }
 
 /// Like render_prompt but injects a pre-parsed config table via set_config
-/// to ensure config changes are picked up immediately (mtime-tracked upstream).
+/// to ensure config changes are picked up immediately.
 /// Note: Context::new still reads the file internally once; this override
 /// ensures the latest cached config is what's used for rendering.
 pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
@@ -156,7 +154,6 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
     );
     sctx.width = ctx.terminal_width;
 
-    // Inject cached config — overrides what Context::new loaded from disk
     sctx = sctx.set_config(config.clone());
 
     let result = starship::print::get_prompt(&sctx);

@@ -118,6 +118,8 @@ fn main() {
         None => { eprintln!("Could not load config"); std::process::exit(1); }
     };
     let mut prompt_cache: HashMap<prompt::CacheKey, String> = HashMap::new();
+    let mut cached_config = prompt::read_config(&config_path);
+    let mut last_cfg_mtime = prompt::get_mtime_ns(&config_path);
     let wide = to_wide(starship_daemon::PIPE_NAME);
     let pipe = unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, 1, 65536, 65536, 0, std::ptr::null()) };
     if pipe == INVALID_HANDLE_VALUE { std::process::exit(0); }
@@ -135,14 +137,14 @@ fn main() {
             status_code: 0,
             keymap: "vi".to_string(),
         };
-        let _ = prompt::render_prompt(&warm_ctx, None);
+        let _ = prompt::render_prompt_with_config(&warm_ctx, None, &cached_config);
     }
 
     loop {
         let handles = [connect_event];
         let rc = unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, 0xFFFFFFFF) };
         if (rc - WAIT_OBJECT_0) == 0 {
-            let _ = handle_client(pipe, &mut config_path, &mut prompt_cache);
+            let _ = handle_client(pipe, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut prompt_cache);
             rearm_connect(pipe, &mut connect_ol, connect_event);
         }
     }
@@ -164,7 +166,7 @@ fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
     else { unsafe { SetEvent(event); } }
 }
 
-fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
+fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
     let mut hdr = [0u8; 4];
     if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { bail!(pipe); }
     let cwd_len = u32::from_le_bytes(hdr) as usize;
@@ -179,31 +181,48 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, prompt_cache: &mut Has
     let props: ClientProps = match ClientProps::parse_json(&props_bytes) { Some(p) => p, None => { bail!(pipe); } };
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
+
+    // Config path change (from request)
     if let Some(ref req) = props.starship_config {
         let p = PathBuf::from(req);
         if p != *config_path {
-            if let Some(new_cfg) = prompt::load_config(&p) { *config_path = new_cfg; prompt_cache.clear(); unsafe { std::env::set_var("STARSHIP_CONFIG", req); } }
+            if let Some(new_cfg) = prompt::load_config(&p) {
+                *config_path = new_cfg;
+                prompt_cache.clear();
+                unsafe { std::env::set_var("STARSHIP_CONFIG", req); }
+                *cached_config = prompt::read_config(config_path);
+                *last_cfg_mtime = prompt::get_mtime_ns(config_path);
+            }
         }
     }
 
+    // Config content change (same path, file modified)
+    let cur_cfg_mtime = prompt::get_mtime_ns(config_path);
+    if cur_cfg_mtime != *last_cfg_mtime {
+        *last_cfg_mtime = cur_cfg_mtime;
+        *cached_config = prompt::read_config(config_path);
+        prompt_cache.clear();
+    }
+
+    let tw = props.terminal_width.unwrap_or(120);
+
     if props.disable_cache.unwrap_or(false) {
-        let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
-        let output = prompt::render_prompt(&ctx, git_dir.as_deref());
+        let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
+        let output = prompt::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
         send_response(pipe, &output);
         return Ok(());
     }
 
     let tb = current_minute();
-    let tw = props.terminal_width.unwrap_or(120);
     let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path, git_dir.as_deref());
+    let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     if let Some(cached) = prompt_cache.get(&ck) {
         send_response(pipe, cached);
         return Ok(());
     }
 
-    let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
-    let output = prompt::render_prompt(&ctx, git_dir.as_deref());
+    let output = prompt::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
     prompt_cache.insert(ck, output.clone());
     if prompt_cache.len() >= CACHE_MAX_ENTRIES { evict_stale(prompt_cache); }
     send_response(pipe, &output);

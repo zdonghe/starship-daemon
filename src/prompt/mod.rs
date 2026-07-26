@@ -119,3 +119,49 @@ pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
     }
     result.trim_end_matches('\n').to_string()
 }
+
+/// Read and parse starship config TOML from disk.
+pub fn read_config(path: &Path) -> toml::Table {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.parse::<toml::Table>().ok())
+        .unwrap_or_default()
+}
+
+/// Like render_prompt but injects a pre-parsed config table via set_config
+/// to ensure config changes are picked up immediately (mtime-tracked upstream).
+/// Note: Context::new still reads the file internally once; this override
+/// ensures the latest cached config is what's used for rendering.
+pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let (current_dir, bust_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
+        Some(git_dir) => {
+            let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
+            let _ = std::fs::create_dir_all(&bust);
+            (bust.clone(), Some(bust))
+        }
+        None => (ctx.cwd.clone(), None),
+    };
+
+    let mut properties = starship::context::Properties::default();
+    properties.status_code = Some(ctx.status_code.to_string());
+    properties.keymap = ctx.keymap.clone();
+
+    let env = starship::context::Env::default();
+    let mut sctx = starship::context::Context::new_with_shell_and_path(
+        properties, starship::context::Shell::Pwsh, starship::context::Target::Main,
+        current_dir, ctx.cwd.clone(), env,
+    );
+    sctx.width = ctx.terminal_width;
+
+    // Inject cached config — overrides what Context::new loaded from disk
+    sctx = sctx.set_config(config.clone());
+
+    let result = starship::print::get_prompt(&sctx);
+    if let Some(dir) = bust_dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    result.trim_end_matches('\n').to_string()
+}

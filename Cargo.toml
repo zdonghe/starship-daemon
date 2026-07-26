@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 starship = { version = "1", default-features = false }
+toml = "1"
 
 [[bin]]
 name = "starship-daemon"

@@ -1,8 +1,4 @@
-# starship-daemon.psm1
-# Drop-in daemon management for starship prompt — Import-Module, auto-start, clean unload.
-#
-# Usage:  Import-Module starship-daemon
-# Remove: Remove-Module starship-daemon  (or Disable-StarshipDaemon)
+# starship-daemon.psm1 — Import-Module, auto-start, clean unload on Remove-Module.
 
 $script:DaemonPath = $env:STARSHIP_DAEMON_PATH
 $script:LastStarshipConfig = $null
@@ -91,7 +87,7 @@ $MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = { Disable-StarshipDaemon }
 # Auto-start daemon on import
 Start-StarshipDaemon
 
-# Set continuation prompt (multi-line input prefix) to match starship default
+# Continuation prompt matching starship default
 Set-PSReadLineOption -ContinuationPrompt "· "
 
 function global:prompt

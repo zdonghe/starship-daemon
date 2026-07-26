@@ -44,7 +44,7 @@ Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 ## Performance
 
 200 samples after 15 warmup rounds, measured from PowerShell client across three directories:
-a non-git desktop folder, the [starship](https://github.com/starship/starship) repo and the [Linux kernel](https://github.com/torvalds/linux) repo
+a non-git desktop folder, the [starship](https://github.com/starship/starship) repo, and the [Linux kernel](https://github.com/torvalds/linux) repo.
 
 | Config | Desktop (non-git) | starship repo (git) | Linux kernel (git) |
 |--------|-------------------|---------------------|--------------------|

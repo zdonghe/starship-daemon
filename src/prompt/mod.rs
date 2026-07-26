@@ -62,7 +62,6 @@ pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_wi
     }
 }
 
-/// Validate that a config file exists.
 pub fn load_config(path: &Path) -> Option<PathBuf> {
     if path.is_file() { Some(path.to_path_buf()) } else { None }
 }
@@ -117,13 +116,9 @@ fn get_or_create_ctx(
     sctx
 }
 
-/// Render the full prompt using starship's native pipeline.
-///
-/// Starship caches git status per `current_dir` in a process-global static
-/// (`get_static_repo_status` in git_status.rs). Every call uses a unique
-/// subdirectory as `current_dir` and the real cwd as `logical_dir`. The
-/// cache key is `current_dir`, so unique paths guarantee a cache miss and
-/// fresh git status on every prompt.
+/// Render prompt using starship's native pipeline.
+/// Uses a unique bust subdir per call to bypass starship's in-process
+/// git_status cache (`get_static_repo_status`), ensuring fresh output.
 pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -155,7 +150,6 @@ pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
     result.trim_end_matches('\n').to_string()
 }
 
-/// Read and parse starship config TOML from disk.
 pub fn read_config(path: &Path) -> toml::Table {
     std::fs::read_to_string(path)
         .ok()
@@ -163,10 +157,9 @@ pub fn read_config(path: &Path) -> toml::Table {
         .unwrap_or_default()
 }
 
-/// Like render_prompt but injects a pre-parsed config table via set_config
-/// to ensure config changes are picked up immediately.
-/// Note: Context::new still reads the file internally once; this override
-/// ensures the latest cached config is what's used for rendering.
+/// Like render_prompt but injects a pre-parsed config table.
+/// Context::new still reads the file once; set_config override ensures the
+/// latest cached config is used for rendering.
 pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);

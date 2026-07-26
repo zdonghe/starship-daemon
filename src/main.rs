@@ -4,8 +4,6 @@ use std::mem;
 use std::path::PathBuf;
 use starship_daemon::prompt::{self, RenderContext};
 
-// -- Win32 FFI for named pipe -------------------
-
 type HANDLE = *mut c_void;
 type DWORD = u32;
 type BOOL = i32;
@@ -58,8 +56,6 @@ fn send_response(pipe: HANDLE, output: &str) {
 fn write_all(pipe: HANDLE, buf: &[u8]) -> bool {
     unsafe { let mut w: DWORD = 0; WriteFile(pipe, buf.as_ptr() as LPCVOID, buf.len() as DWORD, &mut w, std::ptr::null_mut()) != 0 }
 }
-
-// -- Client request properties (manual JSON parser) -------------------
 
 struct ClientProps {
     status_code: Option<i32>,
@@ -129,7 +125,6 @@ fn main() {
     rearm_connect(pipe, &mut connect_ol, connect_event);
     println!("starship-daemon started on {}", starship_daemon::PIPE_NAME);
 
-    // Pre-warm: render once to initialize starship's lazy modules and caches
     {
         let warm_ctx = RenderContext {
             cwd: PathBuf::from("."),
@@ -182,7 +177,6 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
 
-    // Config path change (from request)
     if let Some(ref req) = props.starship_config {
         let p = PathBuf::from(req);
         if p != *config_path {
@@ -196,7 +190,6 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
         }
     }
 
-    // Config content change (same path, file modified)
     let cur_cfg_mtime = prompt::get_mtime_ns(config_path);
     if cur_cfg_mtime != *last_cfg_mtime {
         *last_cfg_mtime = cur_cfg_mtime;

@@ -70,21 +70,18 @@ fn main() {
     let cwd_s = cwd.to_str().unwrap();
     let props = r#"{"status_code":0,"keymap":"viins","terminal_width":120}"#;
 
-    // Wait for daemon to be running
     println!("Connecting to daemon at {} ...", pipe_name);
     let pipe = connect_pipe(pipe_name);
     println!("Connected.\n");
 
-    // Cold (first) request
     let start = Instant::now();
     let output = send_req(pipe, cwd_s, props);
     let cold = start.elapsed();
     println!("cold request (first): {:>8.1} ms  ({} bytes)", cold.as_secs_f64() * 1000.0, output.len());
 
-    // Warm (cached) requests
     let mut times = Vec::new();
     for i in 0..20 {
-        // reconnect for each request (daemon disconnects after serving)
+        // Reconnect per request — daemon disconnects after each response
         let pipe2 = connect_pipe(pipe_name);
         let start = Instant::now();
         let _ = send_req(pipe2, cwd_s, props);

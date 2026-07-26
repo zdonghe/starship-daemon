@@ -57,9 +57,9 @@ fn cache_key_is_directory_not_workdir() {
     let _ = std::fs::remove_file(&test_file);
 
     if has_git_status(&r2) {
-        eprintln!("FRESH — cache key is current_dir (different from workdir)");
+        eprintln!("FRESH");
     } else {
-        eprintln!("STALE — cache key is the workdir (both resolved to same repo)");
+        eprintln!("STALE");
     }
 }
 
@@ -86,8 +86,8 @@ fn existent_path_buster_works() {
     let _ = std::fs::remove_file(&test_file);
 
     if has_git_status(&r2) {
-        eprintln!("SUCCESS: subdir render busted the root cache");
+        eprintln!("SUCCESS");
     } else {
-        eprintln!("FAILED: subdir render did NOT bust the root cache");
+        eprintln!("FAILED");
     }
 }

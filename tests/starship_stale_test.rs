@@ -53,8 +53,8 @@ fn starship_get_prompt_is_stale_in_process() {
     let r2 = render(&repo);
     let _ = std::fs::remove_file(&test_file);
 
-    eprintln!("First render has git status: {}", has_git_status(&r1));
-    eprintln!("Second render has git status: {}", has_git_status(&r2));
+    eprintln!("r1 has_status={}", has_git_status(&r1));
+    eprintln!("r2 has_status={}", has_git_status(&r2));
 
     assert!(
         has_git_status(&r2),

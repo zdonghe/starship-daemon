@@ -11,7 +11,6 @@ fn main() {
     println!("git_dir: {:?}", git_dir);
     println!("config:  {:?}", config);
 
-    // --- Cold render (no pre-warm) ---
     let ctx = RenderContext {
         cwd: cwd.clone(),
         terminal_width: 120,
@@ -24,14 +23,12 @@ fn main() {
     println!("\ncold first render:  {:>8.1} ms", cold_dur.as_secs_f64() * 1000.0);
     println!("  output len: {}", cold_out.len());
 
-    // --- Warm render (pre-warmed by cold render above) ---
     let start = Instant::now();
     let warm_out = prompt::render_prompt(&ctx, git_dir.as_deref());
     let warm_dur = start.elapsed();
     println!("warm (2nd) render: {:>8.1} ms", warm_dur.as_secs_f64() * 1000.0);
     println!("  output len: {}", warm_out.len());
 
-    // --- Multiple renders to see if further improvement ---
     let mut total = 0.0f64;
     for i in 0..10 {
         let start = Instant::now();
@@ -42,7 +39,6 @@ fn main() {
     }
     println!("avg renders 1-10 warm: {:>8.1} ms", total / 10.0);
 
-    // --- Comparison ---
     println!("\n---");
     println!("prewarm saves: {:>8.1} ms (first render)", cold_dur.as_secs_f64() * 1000.0 - warm_dur.as_secs_f64() * 1000.0);
 }

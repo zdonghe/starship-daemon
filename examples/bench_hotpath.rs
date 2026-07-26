@@ -4,7 +4,7 @@ use std::time::Instant;
 use starship_daemon::prompt::{self, CacheKey, RenderContext};
 use starship_daemon::find_git_dir;
 
-/// Render once (cold cache for starship internals)
+/// Cold render to force starship's internal cache population
 fn render_cold(cwd: &PathBuf) -> String {
     let ctx = RenderContext {
         cwd: cwd.clone(),
@@ -27,7 +27,6 @@ fn main() {
     let gd = find_git_dir(&cwd);
     println!("git_dir:    {:?}\n", gd);
 
-    // Warm up starship caches with one render
     let _ = render_cold(&cwd);
     println!("(warm-up render done)\n");
 
@@ -60,7 +59,7 @@ fn main() {
     let n = 10;
     let mut total = 0.0;
     for i in 0..n {
-        // Use a different bust path each time to force a real render
+        // Unique bust path bypasses starship's internal git_status cache
         let bust_cwd = cwd.join(format!("__bench_bust_{}__", i));
         let ctx = RenderContext {
             cwd: bust_cwd,
@@ -71,12 +70,11 @@ fn main() {
         let start = Instant::now();
         let _ = prompt::render_prompt(&ctx, None);
         let elapsed = start.elapsed().as_nanos() as f64 / 1_000_000.0;
-        if i >= 1 { total += elapsed; } // skip first (cold DNS, etc.)
+        if i >= 1 { total += elapsed; } // skip first (filesystem cold cache)
     }
     let avg_ms = total / ((n - 1) as f64);
     println!("  render_prompt full:                  {:>8.1} ms", avg_ms);
 
-    // Summary
     println!("\n--- summary ---");
     println!("  cache hit (key + lookup):             {:>8.1} µs", key_us + hit_ns / 1000.0);
     println!("  cache miss (full render):             {:>8.1} ms", avg_ms);

@@ -9,7 +9,9 @@ $script:LastStarshipConfig = $null
 
 function Start-StarshipDaemon
 {
-    if ([string]::IsNullOrEmpty($script:DaemonPath)) { return }
+    if ([string]::IsNullOrEmpty($script:DaemonPath))
+    { return 
+    }
     if ((Get-Process -Name starship-daemon -ErrorAction SilentlyContinue).Count -eq 0)
     {
         $null = Start-Process -FilePath $script:DaemonPath -WindowStyle Hidden
@@ -92,17 +94,41 @@ Start-StarshipDaemon
 # Set continuation prompt (multi-line input prefix) to match starship default
 Set-PSReadLineOption -ContinuationPrompt "· "
 
-function global:prompt {
-    $lastCmdOk = if ($null -ne $global:PromptLastCmdOk) { $global:PromptLastCmdOk } else { $? }
-    $origLastExitCode = if ($null -ne $global:PromptLastExitCode) { $global:PromptLastExitCode } else { $global:LASTEXITCODE }
+function global:prompt
+{
+    $lastCmdOk = if ($null -ne $global:PromptLastCmdOk)
+    { $global:PromptLastCmdOk 
+    } else
+    { $? 
+    }
+    $origLastExitCode = if ($null -ne $global:PromptLastExitCode)
+    { $global:PromptLastExitCode 
+    } else
+    { $global:LASTEXITCODE 
+    }
     $loc = $executionContext.SessionState.Path.CurrentLocation
 
-    try {
-        $keymap = if ([Microsoft.PowerShell.PSConsoleReadLine]::InViCommandMode()) { "vi" } else { "emacs" }
-        $exitCode = if ($lastCmdOk) { 0 } elseif ($origLastExitCode -ne 0) { $origLastExitCode } else { 1 }
+    try
+    {
+        $keymap = if ([Microsoft.PowerShell.PSConsoleReadLine]::InViCommandMode())
+        { "vi" 
+        } else
+        { "emacs" 
+        }
+        $exitCode = if ($lastCmdOk)
+        { 0 
+        } elseif ($origLastExitCode -ne 0)
+        { $origLastExitCode 
+        } else
+        { 1 
+        }
         $result = Get-StarshipPrompt -ExitCode $exitCode -Keymap $keymap -Width $Host.UI.RawUI.WindowSize.Width
-        if ($result) { return $result }
-    } catch {}
+        if ($result)
+        { return $result 
+        }
+    } catch
+    {
+    }
 
     "PS $($loc.ProviderPath)> "
 }

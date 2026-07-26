@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::Instant;
 use starship_daemon::prompt::{self, RenderContext};
 use starship_daemon::find_git_dir;

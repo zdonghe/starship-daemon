@@ -69,7 +69,6 @@ The daemon uses the official `starship` crate from crates.io.
 For faster git status, uncomment two blocks in `Cargo.toml` and build.
 Uncomment the `gix` dev-dep in `[dev-dependencies]` and the entire `[patch.crates-io]` block below `[[bin]]`.
 
-To build,
 ```
 cargo build --release
 ```

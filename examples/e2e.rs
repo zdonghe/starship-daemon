@@ -1,6 +1,4 @@
 use std::ffi::c_void;
-use std::mem;
-use std::path::PathBuf;
 use std::time::Instant;
 use std::time::Duration;
 
@@ -12,10 +10,6 @@ type LPVOID = *mut c_void;
 type LPCVOID = *const c_void;
 type LPDWORD = *mut u32;
 
-const PIPE_ACCESS_DUPLEX: DWORD = 3;
-const PIPE_TYPE_MESSAGE: DWORD = 4;
-const PIPE_READMODE_MESSAGE: DWORD = 2;
-const PIPE_WAIT: DWORD = 0;
 const NMPWAIT_USE_DEFAULT_WAIT: DWORD = 0;
 const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 
@@ -32,15 +26,15 @@ fn to_wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).col
 
 fn connect_pipe(name: &str) -> HANDLE {
     let wide = to_wide(name);
-    let GENERIC_READ = 0x80000000u32;
-    let GENERIC_WRITE = 0x40000000u32;
-    let OPEN_EXISTING = 3u32;
-    let FILE_FLAG_OVERLAPPED = 0x40000000u32;
+    let generic_read = 0x80000000u32;
+    let generic_write = 0x40000000u32;
+    let open_existing = 3u32;
+    let file_flag_overlapped = 0x40000000u32;
     loop {
         unsafe {
             let ok = WaitNamedPipeW(wide.as_ptr(), NMPWAIT_USE_DEFAULT_WAIT);
             if ok == 0 { std::thread::sleep(Duration::from_millis(10)); continue; }
-            let h = CreateFileW(wide.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_OVERLAPPED, std::ptr::null_mut());
+            let h = CreateFileW(wide.as_ptr(), generic_read | generic_write, 0, std::ptr::null(), open_existing, file_flag_overlapped, std::ptr::null_mut());
             if h != INVALID_HANDLE_VALUE { return h; }
             let err = GetLastError();
             if err == 2 { std::thread::sleep(Duration::from_millis(10)); continue; }

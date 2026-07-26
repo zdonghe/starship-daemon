@@ -21,10 +21,10 @@ config hot watch live reload (cache invalidation on hotreload change?)
 
 speed up compile time
 
-unused compute_cache_key import
+reduce unused dependencies
 
-disable caching doesn't seem to work
+per module caching?
 
-make sure the git bust gets deleted/cleaned up
+no cache perf still poor
 
-add a "starship timings" but for the daemon
+

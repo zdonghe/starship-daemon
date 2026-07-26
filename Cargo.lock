@@ -3039,6 +3039,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "starship"
 version = "1.26.0"
+source = "git+https://github.com/zdonghe/starship?branch=gix-native#32a4999d6a85b7a0cf7bd2deeb5b5a63572f64c5"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3096,6 +3097,7 @@ version = "0.1.0"
 dependencies = [
  "gix",
  "starship",
+ "tempfile",
  "toml 1.1.3+spec-1.1.0",
 ]
 

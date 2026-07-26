@@ -13,6 +13,7 @@ toml = "1"
 
 [dev-dependencies]
 gix = { version = "=0.85.0", features = ["max-performance-safe", "status", "revision"] }
+tempfile = "3"
 
 [[bin]]
 name = "starship-daemon"

@@ -8,10 +8,7 @@ pub struct RenderContext {
     pub keymap: String,
 }
 
-/// Cache key with mtime-based invalidation.
-/// Checks cwd mtime (file create/delete), .git/index mtime (git add/reset),
-/// and .git/HEAD mtime (branch switch/commit) to detect stale cache.
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct CacheKey {
     pub cwd: PathBuf,
     pub status_code: i32,
@@ -20,7 +17,6 @@ pub struct CacheKey {
     pub time_bucket: u64,
     pub cwd_mtime: u64,
     pub index_mtime: u64,
-    pub head_mtime: u64,
     pub branch_mtime: u64,
     pub remote_mtime: u64,
     pub config_mtime: u64,
@@ -60,7 +56,6 @@ pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_wi
         time_bucket,
         cwd_mtime: get_mtime_ns(cwd),
         index_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("index"))).unwrap_or(0),
-        head_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("HEAD"))).unwrap_or(0),
         branch_mtime: br_mtime,
         remote_mtime: rr_mtime,
         config_mtime: get_mtime_ns(config_path),
@@ -81,14 +76,13 @@ pub fn default_config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(".config/starship.toml"))
 }
 
-struct CachedCtx {
+struct RepoCache {
     git_dir: PathBuf,
-    head_mtime: u64,
     index_mtime: u64,
     ctx: Option<starship::context::Context<'static>>,
 }
 
-static CACHED_CTX: Mutex<Option<CachedCtx>> = Mutex::new(None);
+static REPO_CACHE: Mutex<Option<RepoCache>> = Mutex::new(None);
 
 fn get_or_create_ctx(
     git_dir: Option<&Path>,
@@ -100,11 +94,10 @@ fn get_or_create_ctx(
     config: &toml::Table,
 ) -> starship::context::Context<'static> {
     if let Some(gd) = git_dir {
-        let head_mtime = get_mtime_ns(&gd.join("HEAD"));
         let index_mtime = get_mtime_ns(&gd.join("index"));
-        let mut cache = CACHED_CTX.lock().unwrap();
+        let mut cache = REPO_CACHE.lock().unwrap();
         if let Some(ref mut cached) = *cache {
-            if cached.git_dir == gd && cached.head_mtime == head_mtime && cached.index_mtime == index_mtime {
+            if cached.git_dir == gd && cached.index_mtime == index_mtime {
                 if let Some(sctx) = cached.ctx.take() {
                     return sctx;
                 }
@@ -207,12 +200,10 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
     let result = starship::print::get_prompt(&sctx);
 
     if let Some(ref gd) = resolved_git_dir {
-        let head_mtime = get_mtime_ns(&gd.join("HEAD"));
         let index_mtime = get_mtime_ns(&gd.join("index"));
-        let mut cache = CACHED_CTX.lock().unwrap();
-        *cache = Some(CachedCtx {
+        let mut cache = REPO_CACHE.lock().unwrap();
+        *cache = Some(RepoCache {
             git_dir: gd.clone(),
-            head_mtime,
             index_mtime,
             ctx: Some(sctx),
         });
@@ -222,4 +213,22 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
         let _ = std::fs::remove_dir_all(dir);
     }
     result.trim_end_matches('\n').to_string()
+}
+
+pub mod test_helpers {
+    use super::*;
+
+    pub fn repocache_is_empty() -> bool {
+        REPO_CACHE.lock().unwrap().is_none()
+    }
+
+    pub fn repocache_clear() {
+        *REPO_CACHE.lock().unwrap() = None;
+    }
+
+    /// Returns (git_dir, index_mtime) if cache populated.
+    pub fn repocache_state() -> Option<(PathBuf, u64)> {
+        let cache = REPO_CACHE.lock().unwrap();
+        cache.as_ref().map(|c| (c.git_dir.clone(), c.index_mtime))
+    }
 }

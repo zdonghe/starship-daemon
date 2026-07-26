@@ -1,7 +1,18 @@
-/// Test: what does starship use as the cache key for REPO_STATUS?
-/// If it's just the git workdir (canonicalized), then using a different
-/// path won't help — the cache will match anyway.
 use std::path::PathBuf;
+use std::process::Command;
+
+fn init_repo_with_commit() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    Command::new("git").args(["init"]).current_dir(&repo).output().unwrap();
+    Command::new("git").args(["config", "user.email", "test@test"]).current_dir(&repo).output().unwrap();
+    Command::new("git").args(["config", "user.name", "test"]).current_dir(&repo).output().unwrap();
+    std::fs::write(repo.join("initial"), b"").unwrap();
+    Command::new("git").args(["add", "."]).current_dir(&repo).output().unwrap();
+    Command::new("git").args(["commit", "-m", "initial"]).current_dir(&repo).output().unwrap();
+    (dir, repo)
+}
 
 fn render(cwd: &PathBuf) -> String {
     use starship::context::{Context as StarshipContext, Properties, Shell, Target};
@@ -28,59 +39,48 @@ fn has_git_status(s: &str) -> bool {
 
 #[test]
 fn cache_key_is_directory_not_workdir() {
-    let dotfiles = PathBuf::from(r"C:\Users\Dong\Documents\dotfiles");
-    let subdir = dotfiles.join("configs").join("starship");
-    let test_file = dotfiles.join("__test_cache_key__.txt");
+    let (_d, repo) = init_repo_with_commit();
+    let subdir = repo.join("sub");
+    std::fs::create_dir(&subdir).unwrap();
+    let test_file = repo.join("__test_cache_key__.txt");
 
     let _ = std::fs::remove_file(&test_file);
 
-    // Render from subdir (no file yet)
     let r1 = render(&subdir);
     eprintln!("R1 (subdir, no file): has_status={}", has_git_status(&r1));
 
-    // Create file in repo root
     std::fs::write(&test_file, b"test").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Render from repo root (file exists)
-    let r2 = render(&dotfiles);
+    let r2 = render(&repo);
     eprintln!("R2 (root, file exists): has_status={}", has_git_status(&r2));
     let _ = std::fs::remove_file(&test_file);
 
-    // If cache key is the workdir (canonicalized), both render the same workdir,
-    // so R2 would hit the cache from R1 — stale!
-    // If cache key is current_dir (not canonicalized to workdir), they'd differ.
     if has_git_status(&r2) {
         eprintln!("FRESH — cache key is current_dir (different from workdir)");
     } else {
         eprintln!("STALE — cache key is the workdir (both resolved to same repo)");
     }
-
-    // We already know it's stale from the same-path test.
-    // This test just determines WHICH path is used as cache key.
 }
 
 #[test]
 fn existent_path_buster_works() {
-    let dotfiles = PathBuf::from(r"C:\Users\Dong\Documents\dotfiles");
-    let test_file = dotfiles.join("__test_cache_key2__.txt");
+    let (_d, repo) = init_repo_with_commit();
+    let subdir = repo.join("sub");
+    std::fs::create_dir(&subdir).unwrap();
+    let test_file = repo.join("__test_cache_key2__.txt");
     let _ = std::fs::remove_file(&test_file);
 
-    // First render — clean
-    let r1 = render(&dotfiles);
+    let r1 = render(&repo);
     eprintln!("R1 (root, no file): has_status={}", has_git_status(&r1));
 
-    // Create file
     std::fs::write(&test_file, b"test").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Buster: render from a subdirectory inside the same repo
-    let subdir = dotfiles.join("configs").join("starship");
     let r_bust = render(&subdir);
     eprintln!("R_bust (subdir): has_status={}", has_git_status(&r_bust));
 
-    // Real render from root — if cache key is current_dir, this should miss
-    let r2 = render(&dotfiles);
+    let r2 = render(&repo);
     eprintln!("R2 (root, file exists): has_status={}", has_git_status(&r2));
 
     let _ = std::fs::remove_file(&test_file);

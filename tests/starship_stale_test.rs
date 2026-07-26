@@ -1,13 +1,19 @@
-/// Test: does starship's get_prompt() return stale git status
-/// when called multiple times in the same process?
-///
-/// Root cause of the daemon's stale git status.
-/// The subprocess (starship prompt) works because each call
-/// is a new process. The library (starship::print::get_prompt)
-/// caches repo state internally and doesn't re-scan on subsequent calls.
-
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
+
+fn init_repo_with_commit() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    Command::new("git").args(["init"]).current_dir(&repo).output().unwrap();
+    Command::new("git").args(["config", "user.email", "test@test"]).current_dir(&repo).output().unwrap();
+    Command::new("git").args(["config", "user.name", "test"]).current_dir(&repo).output().unwrap();
+    std::fs::write(repo.join("initial"), b"").unwrap();
+    Command::new("git").args(["add", "."]).current_dir(&repo).output().unwrap();
+    Command::new("git").args(["commit", "-m", "initial"]).current_dir(&repo).output().unwrap();
+    (dir, repo)
+}
 
 fn render(cwd: &PathBuf) -> String {
     use starship::context::{Context as StarshipContext, Properties, Shell, Target};
@@ -34,17 +40,17 @@ fn has_git_status(s: &str) -> bool {
 
 #[test]
 fn starship_get_prompt_is_stale_in_process() {
-    let cwd = PathBuf::from(r"C:\Users\Dong\Documents\dotfiles");
-    let test_file = cwd.join("__test_starship_stale__.txt");
+    let (_d, repo) = init_repo_with_commit();
+    let test_file = repo.join("__test_starship_stale__.txt");
 
     let _ = std::fs::remove_file(&test_file);
 
-    let r1 = render(&cwd);
+    let r1 = render(&repo);
 
     std::fs::write(&test_file, b"test").unwrap();
     std::thread::sleep(Duration::from_millis(500));
 
-    let r2 = render(&cwd);
+    let r2 = render(&repo);
     let _ = std::fs::remove_file(&test_file);
 
     eprintln!("First render has git status: {}", has_git_status(&r1));

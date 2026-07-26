@@ -1,4 +1,5 @@
-$env:STARSHIP_CONFIG = "C:\Users\Dong\Documents\dotfiles\configs\starship\starship.toml"
+# Set STARSHIP_CONFIG before running, or starship will use its default
+if (-not $env:STARSHIP_CONFIG) { $env:STARSHIP_CONFIG = "$env:USERPROFILE\.config\starship.toml" }
 
 # Generate + dot-source starship's actual init script, so `prompt` is the real thing
 (& starship init powershell) | Out-String | Invoke-Expression

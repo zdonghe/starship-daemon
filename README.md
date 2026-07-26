@@ -92,3 +92,7 @@ $env:STARSHIP_DAEMON_PATH_GIX = "C:\path\to\starship-daemon-gix.exe"
 
 perf/scripts/bench-all.ps1
 ```
+
+## Future
+
+If for some reason the caching is not sufficient, could try and make "module-specific" caching. For example, the time cache is invalid after 1 minute, and as a result, the entire prompt, including `git` operations, get recomputed. This is wasted work.

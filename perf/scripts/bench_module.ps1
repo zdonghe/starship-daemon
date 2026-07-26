@@ -36,8 +36,9 @@ Write-Host ("Ratio: {0:N1}x slower" -f ($sB[500] / $sA[500]))
 Get-Process -Name starship-daemon -ErrorAction SilentlyContinue | Stop-Process -Force 2>$null
 Start-Sleep 2
 
+if (-not $env:STARSHIP_DAEMON_PATH) { Write-Warning "STARSHIP_DAEMON_PATH not set"; exit }
 $swTotal = [System.Diagnostics.Stopwatch]::StartNew()
-$null = Start-Process -FilePath "C:\Users\Dong\Documents\code\starship-daemon\target\release\starship-daemon.exe" -WindowStyle Hidden
+$null = Start-Process -FilePath $env:STARSHIP_DAEMON_PATH -WindowStyle Hidden
 for ($i = 0; $i -lt 5; $i++) {
     try {
         $test = [System.IO.Pipes.NamedPipeClientStream]::new(".", "starship-daemon")

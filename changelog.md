@@ -31,8 +31,8 @@ multiline statements look kinda off?
 
 One thing worth flagging in the cached numbers
 
-Max is 8.32ms against a median of 1.09ms — that's a ~7.6x ratio, way more elongated than your no-cache max/median ratio (~1.4x). Worth a quick look at what's driving that tail, since it's the only slightly odd shape in these three datasets. A few likely candidates:
-
+Max is 8.32ms against a median of 1.09ms — that's a ~7.6x ratio, way more elongated than your no-cache max/median ratio (~1.4x).
+Possibilities:
 Occasional cache invalidation/miss firing mid-run (e.g. if something touches $script:LastStarshipConfig state or a timestamp-based cache check occasionally fails)
 Named pipe contention/GC pause on the client side
 One or two outlier scheduler blips (200 samples isn't huge, a couple of unlucky ones can skew max without moving median)
@@ -45,9 +45,7 @@ If your daemon opens a fresh git2::Repository (or shells out to git) on every re
 
 Avoids re-walking up the directory tree to find .git each time
 Avoids re-reading packed-refs from disk each time
-Still gives you a genuinely fresh status result — this isn't caching the answer, just the setup cost
 
-This alone often accounts for a big chunk of "non-cache" latency, since repo discovery/config parsing is surprisingly expensive relative to the actual status diff.
 
 2. Limit what git status actually scans
 
@@ -74,13 +72,8 @@ This is architecturally the better fix — it removes the cache/no-cache tradeof
 
 4. Parallelize independent module evaluation
 
-If your daemon (or starship itself, if you're calling into its module system) evaluates modules sequentially — git branch, git status, directory, language version detection, etc. — and several are independent of each other, running them concurrently (thread pool / async tasks) can cut wall time down to whichever module is slowest, rather than the sum of all of them.
+Running them concurrently (thread pool / async tasks) can cut wall time down to whichever module is slowest, rather than the sum of all of them.
 
-5. Only if the above aren't enough — yes, touch git-status logic directly
 
-If you've done 1-2 and it's still not fast enough, then yes, you'd be looking at the actual status-computation path (whether that's starship's own git_status module or your daemon's reimplementation of it). Things to look at there specifically:
-
-Are you calling git status as a subprocess (shelling out) instead of using libgit2 bindings directly? Subprocess-per-status-check reintroduces a smaller version of the exact spawn problem you just solved for the whole prompt.
 Is diff/ahead-behind calculation happening even when the user's config doesn't display it? Skipping unused segments based on the parsed starship.toml config (rather than computing everything and discarding) avoids wasted work.
-
 

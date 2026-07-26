@@ -1,0 +1,2 @@
+# Auto-detect text files and normalize to LF in repo, platform-native on checkout
+* text=auto

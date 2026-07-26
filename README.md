@@ -15,11 +15,15 @@ todo: actual perf numbers, starship lonesome, starship-daemon, starship-daemon +
 ```powershell
 $env:STARSHIP_DAEMON_PATH="c:\path\to\daemon"
 Import-Module "c:\path\to\starship-daemon.psm1" -DisableNameChecking
+
+# for error code support, add this to prompt function
+function prompt {
+    $script:PromptLastCmdOk = $?
+    $script:PromptLastExitCode = $global:LASTEXITCODE
+}
 ```
 
 This auto-starts the daemon and replaces your prompt function. See `starship-daemon.psm1` for the complete client.
-
-todo: make the module actually plug and play, instead of requiring edits to the prompt function aswell
 
 ## Config
 
@@ -32,7 +36,7 @@ $env:STARSHIP_CONFIG = "C:\path\to\starship.toml"
 Hot reloading is supported.
 
 ## Caching
-Caching can dramatically reduce prompt latency and reduce redundant work. However, it might result in stale/inaccurate prompts.
+Caching dramatically reduces prompt latency and reduces redundant work. However, it might result in stale/inaccurate prompts.
 
 Caching can be disabled by setting `$env:STARSHIP_DAEMON_CACHE=0`.
 

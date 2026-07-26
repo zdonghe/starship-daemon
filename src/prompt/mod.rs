@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub struct RenderContext {
     pub cwd: PathBuf,
@@ -80,6 +81,49 @@ pub fn default_config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(".config/starship.toml"))
 }
 
+struct CachedCtx {
+    git_dir: PathBuf,
+    head_mtime: u64,
+    index_mtime: u64,
+    ctx: Option<starship::context::Context<'static>>,
+}
+
+static CACHED_CTX: Mutex<Option<CachedCtx>> = Mutex::new(None);
+
+fn get_or_create_ctx(
+    git_dir: Option<&Path>,
+    current_dir: &Path,
+    logical_dir: &Path,
+    status_code: i32,
+    keymap: &str,
+    terminal_width: usize,
+    config: &toml::Table,
+) -> starship::context::Context<'static> {
+    if let Some(gd) = git_dir {
+        let head_mtime = get_mtime_ns(&gd.join("HEAD"));
+        let index_mtime = get_mtime_ns(&gd.join("index"));
+        let mut cache = CACHED_CTX.lock().unwrap();
+        if let Some(ref mut cached) = *cache {
+            if cached.git_dir == gd && cached.head_mtime == head_mtime && cached.index_mtime == index_mtime {
+                if let Some(sctx) = cached.ctx.take() {
+                    return sctx;
+                }
+            }
+        }
+    }
+    let mut properties = starship::context::Properties::default();
+    properties.status_code = Some(status_code.to_string());
+    properties.keymap = keymap.to_string();
+    let env = starship::context::Env::default();
+    let mut sctx = starship::context::Context::new_with_shell_and_path(
+        properties, starship::context::Shell::Pwsh, starship::context::Target::Main,
+        current_dir.to_path_buf(), logical_dir.to_path_buf(), env,
+    );
+    sctx.width = terminal_width;
+    sctx = sctx.set_config(config.clone());
+    sctx
+}
+
 /// Render the full prompt using starship's native pipeline.
 ///
 /// Starship caches git status per `current_dir` in a process-global static
@@ -134,29 +178,46 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
     use std::sync::atomic::{AtomicU64, Ordering};
     static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let (current_dir, bust_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
+    let (current_dir, bust_dir, resolved_git_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
         Some(git_dir) => {
             let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
             let _ = std::fs::create_dir_all(&bust);
-            (bust.clone(), Some(bust))
+            (bust.clone(), Some(bust), Some(git_dir))
         }
-        None => (ctx.cwd.clone(), None),
+        None => (ctx.cwd.clone(), None, None),
     };
 
-    let mut properties = starship::context::Properties::default();
-    properties.status_code = Some(ctx.status_code.to_string());
-    properties.keymap = ctx.keymap.clone();
-
-    let env = starship::context::Env::default();
-    let mut sctx = starship::context::Context::new_with_shell_and_path(
-        properties, starship::context::Shell::Pwsh, starship::context::Target::Main,
-        current_dir, ctx.cwd.clone(), env,
+    let mut sctx = get_or_create_ctx(
+        resolved_git_dir.as_deref(),
+        &current_dir,
+        &ctx.cwd,
+        ctx.status_code,
+        &ctx.keymap,
+        ctx.terminal_width,
+        config,
     );
-    sctx.width = ctx.terminal_width;
 
+    sctx.current_dir = current_dir.clone();
+    sctx.logical_dir = ctx.cwd.clone();
+    sctx.width = ctx.terminal_width;
+    sctx.properties.status_code = Some(ctx.status_code.to_string());
+    sctx.properties.keymap = ctx.keymap.clone();
     sctx = sctx.set_config(config.clone());
 
     let result = starship::print::get_prompt(&sctx);
+
+    if let Some(ref gd) = resolved_git_dir {
+        let head_mtime = get_mtime_ns(&gd.join("HEAD"));
+        let index_mtime = get_mtime_ns(&gd.join("index"));
+        let mut cache = CACHED_CTX.lock().unwrap();
+        *cache = Some(CachedCtx {
+            git_dir: gd.clone(),
+            head_mtime,
+            index_mtime,
+            ctx: Some(sctx),
+        });
+    }
+
     if let Some(dir) = bust_dir {
         let _ = std::fs::remove_dir_all(dir);
     }

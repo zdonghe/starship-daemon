@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
 use std::path::PathBuf;
-
 use starship_daemon::prompt::{self, RenderContext};
 
 // -- Win32 FFI for named pipe -------------------
@@ -67,6 +66,7 @@ struct ClientProps {
     keymap: Option<String>,
     terminal_width: Option<usize>,
     starship_config: Option<String>,
+    disable_cache: Option<bool>,
 }
 
 impl ClientProps {
@@ -77,6 +77,7 @@ impl ClientProps {
         let mut keymap = None;
         let mut terminal_width = None;
         let mut starship_config = None;
+        let mut disable_cache = None;
         let mut i = 0;
         let bytes = s.as_bytes();
         while i < bytes.len() {
@@ -98,13 +99,15 @@ impl ClientProps {
                 let val = std::str::from_utf8(&bytes[vs..i]).ok()?.to_string(); i += 1;
                 match key { "keymap" => keymap = Some(val), "starship_config" => starship_config = Some(val), _ => {} }
             } else if i + 3 < bytes.len() && &bytes[i..i+4] == b"null" { i += 4; }
+            else if i + 3 < bytes.len() && &bytes[i..i+4] == b"true" { i += 4; match key { "disable_cache" => disable_cache = Some(true), _ => {} } }
+            else if i + 4 < bytes.len() && &bytes[i..i+5] == b"false" { i += 5; match key { "disable_cache" => disable_cache = Some(false), _ => {} } }
             else {
                 let vs = i; while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' && bytes[i] != b' ' { i += 1; }
                 let val = std::str::from_utf8(&bytes[vs..i]).ok()?;
                 match key { "status_code" => status_code = val.parse::<i32>().ok(), "terminal_width" => terminal_width = val.parse::<usize>().ok(), _ => {} }
             }
         }
-        Some(ClientProps { status_code, keymap, terminal_width, starship_config })
+        Some(ClientProps { status_code, keymap, terminal_width, starship_config, disable_cache })
     }
 }
 
@@ -182,7 +185,8 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, prompt_cache: &mut Has
             if let Some(new_cfg) = prompt::load_config(&p) { *config_path = new_cfg; prompt_cache.clear(); unsafe { std::env::set_var("STARSHIP_CONFIG", req); } }
         }
     }
-    if std::env::var("STARSHIP_DAEMON_CACHE").map(|v| v == "0").unwrap_or(false) {
+
+    if props.disable_cache.unwrap_or(false) {
         let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
         let output = prompt::render_prompt(&ctx, git_dir.as_deref());
         send_response(pipe, &output);

@@ -49,8 +49,8 @@ fn get_branch_ref_mtimes(git_dir: &std::path::Path) -> (u64, u64) {
     (branch_mtime, remote_mtime)
 }
 
-pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path) -> CacheKey {
-    let git_dir = crate::find_git_dir(cwd);
+pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path, git_dir: Option<&Path>) -> CacheKey {
+    let git_dir: Option<PathBuf> = git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(cwd));
     let (br_mtime, rr_mtime) = git_dir.as_ref().map(|d| get_branch_ref_mtimes(d)).unwrap_or((0, 0));
     CacheKey {
         cwd: cwd.to_path_buf(),
@@ -89,11 +89,11 @@ pub fn default_config_path() -> PathBuf {
 /// subdirectory as `current_dir` and the real cwd as `logical_dir`. The
 /// cache key is `current_dir`, so unique paths guarantee a cache miss and
 /// fresh git status on every prompt.
-pub fn render_prompt(ctx: &RenderContext) -> String {
+pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let (current_dir, bust_dir) = match crate::find_git_dir(&ctx.cwd) {
+    let (current_dir, bust_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
         Some(git_dir) => {
             let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
             let _ = std::fs::create_dir_all(&bust);

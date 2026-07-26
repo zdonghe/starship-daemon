@@ -39,12 +39,12 @@ fn cache_key_changes_on_file_create_in_subdir() {
     let test_file = subdir.join("__test_git_create__.txt");
 
     let _ = std::fs::remove_file(&test_file);
-    let key1 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG));
+    let key1 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG), None);
 
     std::fs::write(&test_file, b"test").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let key2 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG));
+    let key2 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG), None);
     let _ = std::fs::remove_file(&test_file);
 
     assert_ne!(key1.cwd_mtime, key2.cwd_mtime,
@@ -61,7 +61,7 @@ fn cache_key_changes_after_git_add_from_subdir() {
     std::fs::write(&test_file, b"test").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let key1 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG));
+    let key1 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG), None);
 
     let out = Command::new("git")
         .args(["-C", DOTFILES, "add", test_file.file_name().unwrap().to_str().unwrap()])
@@ -69,7 +69,7 @@ fn cache_key_changes_after_git_add_from_subdir() {
     assert!(out.status.success(), "git add failed");
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let key2 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG));
+    let key2 = prompt::compute_cache_key(&subdir, 0, "vi", 120, 0, Path::new(CFG), None);
 
     let _ = Command::new("git").args(["-C", DOTFILES, "reset", "HEAD", "--", test_file.file_name().unwrap().to_str().unwrap()]).output();
     let _ = std::fs::remove_file(&test_file);

@@ -132,7 +132,7 @@ fn main() {
             status_code: 0,
             keymap: "vi".to_string(),
         };
-        let _ = prompt::render_prompt(&warm_ctx);
+        let _ = prompt::render_prompt(&warm_ctx, None);
     }
 
     loop {
@@ -172,6 +172,7 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, prompt_cache: &mut Has
     let mut props_bytes = vec![0u8; props_len];
     if !read_exact(pipe, &mut props_bytes) { bail!(pipe); }
     let cwd = PathBuf::from(String::from_utf8_lossy(&cwd_bytes).as_ref());
+    let git_dir = starship_daemon::find_git_dir(&cwd);
     let props: ClientProps = match ClientProps::parse_json(&props_bytes) { Some(p) => p, None => { bail!(pipe); } };
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
@@ -183,14 +184,14 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, prompt_cache: &mut Has
     }
     if std::env::var("STARSHIP_DAEMON_CACHE").map(|v| v == "0").unwrap_or(false) {
         let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width.unwrap_or(120), status_code, keymap };
-        let output = prompt::render_prompt(&ctx);
+        let output = prompt::render_prompt(&ctx, git_dir.as_deref());
         send_response(pipe, &output);
         return Ok(());
     }
 
     let tb = current_minute();
     let tw = props.terminal_width.unwrap_or(120);
-    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path);
+    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path, git_dir.as_deref());
 
     if let Some(cached) = prompt_cache.get(&ck) {
         send_response(pipe, cached);
@@ -198,7 +199,7 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, prompt_cache: &mut Has
     }
 
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
-    let output = prompt::render_prompt(&ctx);
+    let output = prompt::render_prompt(&ctx, git_dir.as_deref());
     prompt_cache.insert(ck, output.clone());
     if prompt_cache.len() >= CACHE_MAX_ENTRIES { evict_stale(prompt_cache); }
     send_response(pipe, &output);

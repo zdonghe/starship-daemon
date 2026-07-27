@@ -36,7 +36,7 @@ $modulePath = if ($env:STARSHIP_MODULE_PATH) {
 
 # ---- 1. Plain starship (subprocess) ----
 Write-Host "`n=== plain starship (subprocess) ===" -ForegroundColor Cyan
-Get-Process starship-daemon -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process "*starship-daemon*" -ErrorAction SilentlyContinue | Stop-Process -Force
 Set-Location $targetDir
 $env:STARSHIP_CONFIG = $cfg
 try {
@@ -78,7 +78,7 @@ if ($daemonGix) {
 foreach ($v in $variants) {
     Write-Host "=== $($v.label) ===" -ForegroundColor Cyan
 
-    Get-Process starship-daemon -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process "*starship-daemon*" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 500
 
     $env:STARSHIP_CONFIG = $cfg

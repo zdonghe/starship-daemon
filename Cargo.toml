@@ -12,17 +12,15 @@ starship = { version = "1", default-features = false }
 toml = "1"
 
 [dev-dependencies]
-# Uncomment for gix-native fork (faster git status):
-# gix = { version = "0.85", features = ["max-performance-safe", "status", "revision"] }
+gix = { version = "0.85", features = ["max-performance-safe", "status", "revision"] }
 tempfile = "3"
 
 [[bin]]
 name = "starship-daemon"
 path = "src/main.rs"
 
-# Uncomment for gix-native fork:
-# [patch.crates-io]
-# starship = { git = "https://github.com/zdonghe/starship", branch = "gix-native" }
+[patch.crates-io]
+starship = { path = 'C:\Users\Dong\.cargo\git\checkouts\starship-56ef63aea5372fed\a64af43' }
 
 [profile.release]
 lto = "fat"

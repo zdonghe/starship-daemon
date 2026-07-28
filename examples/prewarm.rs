@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::time::Instant;
 use starship_daemon::prompt::{self, RenderContext};
 use starship_daemon::find_git_dir;
 
 fn main() {
-    let cwd = std::env::current_dir().unwrap();
+    let cwd = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap());
     let git_dir = find_git_dir(&cwd);
     let config = prompt::default_config_path();
     let _config = prompt::load_config(&config);

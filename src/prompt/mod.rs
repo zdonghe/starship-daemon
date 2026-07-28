@@ -23,12 +23,46 @@ pub struct CacheKey {
 }
 
 pub fn get_mtime_ns(p: &std::path::Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        type DWORD = u32;
+        type BOOL = i32;
+        type LPCWSTR = *const u16;
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct FILETIME { dwLowDateTime: DWORD, dwHighDateTime: DWORD }
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct WIN32_FILE_ATTRIBUTE_DATA {
+            dwFileAttributes: DWORD,
+            ftCreationTime: FILETIME,
+            ftLastAccessTime: FILETIME,
+            ftLastWriteTime: FILETIME,
+            nFileSizeHigh: DWORD,
+            nFileSizeLow: DWORD,
+        }
+        unsafe extern "system" {
+            fn GetFileAttributesExW(lpFileName: LPCWSTR, fInfoLevelId: DWORD, lpFileInformation: *mut std::ffi::c_void) -> BOOL;
+        }
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0u16)).collect();
+        let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileAttributesExW(wide.as_ptr(), 1, &mut data as *mut _ as *mut std::ffi::c_void) } == 0 {
+            return 0;
+        }
+        let intervals = ((data.ftLastWriteTime.dwHighDateTime as u64) << 32) | (data.ftLastWriteTime.dwLowDateTime as u64);
+        const EPOCH_DIFF: u64 = 116444736000000000;
+        intervals.saturating_sub(EPOCH_DIFF) * 100
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    }
 }
 
 fn get_branch_ref_mtimes(git_dir: &std::path::Path) -> (u64, u64) {
@@ -49,15 +83,10 @@ pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_wi
     let git_dir: Option<PathBuf> = git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(cwd));
     let (br_mtime, rr_mtime) = git_dir.as_ref().map(|d| get_branch_ref_mtimes(d)).unwrap_or((0, 0));
     CacheKey {
-        cwd: cwd.to_path_buf(),
-        status_code,
-        keymap: keymap.to_string(),
-        terminal_width,
-        time_bucket,
+        cwd: cwd.to_path_buf(), status_code, keymap: keymap.to_string(), terminal_width, time_bucket,
         cwd_mtime: get_mtime_ns(cwd),
         index_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("index"))).unwrap_or(0),
-        branch_mtime: br_mtime,
-        remote_mtime: rr_mtime,
+        branch_mtime: br_mtime, remote_mtime: rr_mtime,
         config_mtime: get_mtime_ns(config_path),
     }
 }

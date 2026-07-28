@@ -20,7 +20,7 @@ name = "starship-daemon"
 path = "src/main.rs"
 
 [patch.crates-io]
-starship = { path = 'C:\Users\Dong\.cargo\git\checkouts\starship-56ef63aea5372fed\a64af43' }
+starship = { git = "https://github.com/zdonghe/starship", branch = "main" }
 
 [profile.release]
 lto = "fat"

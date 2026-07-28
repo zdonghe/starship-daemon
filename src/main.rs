@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::io::Write;
 use std::mem;
 use std::path::PathBuf;
 use starship_daemon::prompt::{self, RenderContext};
@@ -47,11 +48,7 @@ fn to_wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).col
 fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
     unsafe { let mut r: DWORD = 0; ReadFile(pipe, buf.as_mut_ptr() as LPVOID, buf.len() as DWORD, &mut r, std::ptr::null_mut()) != 0 && r == buf.len() as DWORD }
 }
-fn send_response(pipe: HANDLE, output: &str) {
-    let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
-    write_all(pipe, &l); write_all(pipe, b);
-    unsafe { FlushFileBuffers(pipe); DisconnectNamedPipe(pipe); }
-}
+
 
 fn write_all(pipe: HANDLE, buf: &[u8]) -> bool {
     unsafe { let mut w: DWORD = 0; WriteFile(pipe, buf.as_ptr() as LPCVOID, buf.len() as DWORD, &mut w, std::ptr::null_mut()) != 0 }
@@ -161,7 +158,18 @@ fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
     else { unsafe { SetEvent(event); } }
 }
 
+fn send_response(pipe: HANDLE, output: &str) {
+    let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
+    let mut buf = [0u8; 4 + 65536];
+    buf[..4].copy_from_slice(&l);
+    buf[4..4+b.len()].copy_from_slice(b);
+    write_all(pipe, &buf[..4+b.len()]);
+    unsafe { FlushFileBuffers(pipe); DisconnectNamedPipe(pipe); }
+}
+
 fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
+    let t_start = std::time::Instant::now();
+
     let mut hdr = [0u8; 4];
     if !read_exact(pipe, &mut hdr) || u32::from_le_bytes(hdr) as usize > 32768 { bail!(pipe); }
     let cwd_len = u32::from_le_bytes(hdr) as usize;
@@ -171,8 +179,12 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     let props_len = u32::from_le_bytes(hdr) as usize;
     let mut props_bytes = vec![0u8; props_len];
     if !read_exact(pipe, &mut props_bytes) { bail!(pipe); }
+    let t_read = std::time::Instant::now();
+
     let cwd = PathBuf::from(String::from_utf8_lossy(&cwd_bytes).as_ref());
+    let t_find_git = std::time::Instant::now();
     let git_dir = starship_daemon::find_git_dir(&cwd);
+    let t_find_git_end = std::time::Instant::now();
     let props: ClientProps = match ClientProps::parse_json(&props_bytes) { Some(p) => p, None => { bail!(pipe); } };
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
@@ -206,18 +218,35 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
         return Ok(());
     }
 
+    let t_pre_key = std::time::Instant::now();
     let tb = current_minute();
     let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path, git_dir.as_deref());
+    let t_key_end = std::time::Instant::now();
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     if let Some(cached) = prompt_cache.get(&ck) {
+        let t_hit = std::time::Instant::now();
         send_response(pipe, cached);
+        let t_end = std::time::Instant::now();
+        let read_us = (t_read - t_start).as_secs_f64() * 1_000_000.0;
+        let find_git_us = (t_find_git_end - t_find_git).as_secs_f64() * 1_000_000.0;
+        let key_us = (t_key_end - t_pre_key).as_secs_f64() * 1_000_000.0;
+        let hit_us = (t_end - t_hit).as_secs_f64() * 1_000_000.0;
+        let total_us = (t_end - t_start).as_secs_f64() * 1_000_000.0;
+        eprintln!("HIT:  read={read_us:.0}us  find_git={find_git_us:.0}us  key={key_us:.0}us  hit={hit_us:.0}us  total={total_us:.0}us");
+        let _ = std::io::stderr().flush();
         return Ok(());
     }
 
+    let t_render = std::time::Instant::now();
     let output = prompt::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
     prompt_cache.insert(ck, output.clone());
     if prompt_cache.len() >= CACHE_MAX_ENTRIES { evict_stale(prompt_cache); }
     send_response(pipe, &output);
+    let t_end = std::time::Instant::now();
+    let total_us = (t_end - t_start).as_secs_f64() * 1_000_000.0;
+    let render_us = (t_end - t_render).as_secs_f64() * 1_000_000.0;
+    eprintln!("MISS: total={total_us:.0}us  render={render_us:.0}us");
+    let _ = std::io::stderr().flush();
     Ok(())
 }

@@ -93,7 +93,7 @@ fn main() {
     let mut last_cfg_mtime = cache::get_mtime_ns(&config_path);
     let wide = ffi::to_wide(starship_daemon::PIPE_NAME);
     let pipe = unsafe { ffi::CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, 1, 65536, 65536, 0, std::ptr::null()) };
-    if pipe == ffi::INVALID_HANDLE_VALUE { std::process::exit(0); }
+    if pipe == ffi::INVALID_HANDLE_VALUE { std::process::exit(1); }
     let connect_event = unsafe { ffi::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
     let mut connect_ol: ffi::OVERLAPPED = unsafe { mem::zeroed() };
 
@@ -108,7 +108,7 @@ fn main() {
             keymap: "vi".to_string(),
         };
         let warm_key = cache::compute_cache_key(
-            Path::new("."), 0, "vi", 120, 0, &config_path, None, 0,
+            Path::new("."), 0, "vi", 120, &config_path, None, 0,
         );
         let _ = cache::render_cached(&warm_ctx, None, &cached_config, &warm_key, &mut lru);
     }
@@ -203,8 +203,9 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
     if let Some(r) = repo_root { watcher.ensure(r); }
     watcher.poll();
+    watcher.process_dirty();
     let watcher_gen = repo_root.map(|r| watcher.generation(r)).unwrap_or(0);
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cache::current_minute(), config_path.as_path(), git_dir.as_deref(), watcher_gen);
+    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, config_path.as_path(), git_dir.as_deref(), watcher_gen);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);

@@ -11,6 +11,8 @@ fn ensure_watcher(w: &mut WatcherState, repo: &std::path::Path) -> u64 {
     w.ensure(repo);
     thread::sleep(Duration::from_millis(300));
     w.poll();
+    thread::sleep(Duration::from_millis(150));
+    w.process_dirty();
     w.generation(repo)
 }
 
@@ -18,6 +20,8 @@ fn assert_gen_increases(w: &mut WatcherState, repo: &std::path::Path, before: u6
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         w.poll();
+        thread::sleep(Duration::from_millis(150));
+        w.process_dirty();
         let g = w.generation(repo);
         if g > before { return g; }
         thread::sleep(Duration::from_millis(20));
@@ -33,8 +37,8 @@ fn assert_gen_increases(w: &mut WatcherState, repo: &std::path::Path, before: u6
 fn cwd_field_differentiates_directories() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
+    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
     assert_eq!(k1.cwd, k2.cwd);
 }
 
@@ -42,8 +46,8 @@ fn cwd_field_differentiates_directories() {
 fn status_code_field_differentiates_exit_codes() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
-    let k2 = cache::compute_cache_key(r.path(), 1, "vi", 120, 0, &cfg, None, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
+    let k2 = cache::compute_cache_key(r.path(), 1, "vi", 120, &cfg, None, 1);
     assert_ne!(k1, k2);
 }
 
@@ -51,8 +55,8 @@ fn status_code_field_differentiates_exit_codes() {
 fn keymap_field_differentiates_keymaps() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "emacs", 120, 0, &cfg, None, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
+    let k2 = cache::compute_cache_key(r.path(), 0, "emacs", 120, &cfg, None, 1);
     assert_ne!(k1, k2);
 }
 
@@ -60,17 +64,8 @@ fn keymap_field_differentiates_keymaps() {
 fn terminal_width_field_differentiates_widths() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 80, 0, &cfg, None, 1);
-    assert_ne!(k1, k2);
-}
-
-#[test]
-fn time_bucket_field_differentiates_buckets() {
-    let r = TestRepo::new();
-    let cfg = no_config();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 1, &cfg, None, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
+    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 80, &cfg, None, 1);
     assert_ne!(k1, k2);
 }
 
@@ -444,10 +439,10 @@ fn gen_bumps_on_branch_create() {
 fn cache_key_unchanged_on_tag() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     r.git(&["tag", "v1.0"]);
     settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     assert_eq!(before, after);
 }
 
@@ -457,10 +452,10 @@ fn cache_key_unchanged_on_tag() {
 fn git_log_is_read_only() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     r.git(&["log", "--oneline"]);
     settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     assert_eq!(before, after);
 }
 
@@ -468,10 +463,10 @@ fn git_log_is_read_only() {
 fn git_diff_is_read_only() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     r.git(&["diff"]);
     settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     assert_eq!(before, after);
 }
 
@@ -479,10 +474,10 @@ fn git_diff_is_read_only() {
 fn cache_key_unchanged_on_git_config() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     r.git(&["config", "test.dummy", "value"]);
     settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     assert_eq!(before, after);
 }
 
@@ -490,10 +485,10 @@ fn cache_key_unchanged_on_git_config() {
 fn git_archive_is_read_only() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     r.git(&["archive", "--format=tar", "HEAD"]);
     settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     assert_eq!(before, after);
 }
 
@@ -501,10 +496,10 @@ fn git_archive_is_read_only() {
 fn git_log_with_patch_is_read_only() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     r.git(&["log", "-p", "--all"]);
     settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 0);
     assert_eq!(before, after);
 }
 
@@ -514,13 +509,13 @@ fn git_log_with_patch_is_read_only() {
 fn cache_key_unchanged_after_git_ops_with_same_gen() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
+    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
 
     r.write("noise.txt", "should not affect cache key");
     r.git(&["add", "noise.txt"]);
     r.git(&["commit", "-m", "noise commit"]);
 
-    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
+    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
     assert_eq!(key_before, key_after,
         "cache key must not change with same watcher_gen; mtimes should not differentiate");
 }
@@ -536,10 +531,10 @@ fn config_mtime_changes_cache_key() {
     let r = TestRepo::new();
 
     let g0 = 1u64;
-    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg_path, None, g0);
+    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg_path, None, g0);
     std::fs::write(&cfg_path, "format = 'changed'\n").unwrap();
     settle();
-    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg_path, None, g0);
+    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg_path, None, g0);
 
     assert_ne!(key_before, key_after, "config change should produce different cache key (config_mtime tracked)");
 }
@@ -565,7 +560,7 @@ fn no_upstream_branch_works() {
     let cfg = no_config();
     r.git(&["checkout", "-b", "no-upstream"]);
     settle();
-    let k = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 1);
+    let k = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
+    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, &cfg, None, 1);
     assert_eq!(k, k2);
 }

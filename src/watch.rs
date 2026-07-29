@@ -127,23 +127,18 @@ impl WatcherState {
         unsafe {
             let mut bytes: DWORD = 0;
             let ok = ffi::GetOverlappedResult(rw.dir_handle, &mut rw.overlapped as *mut _ as *mut c_void, &mut bytes, 1);
-            eprintln!("handle_event[{}]: GetOverlappedResult ok={} bytes={}", idx, ok, bytes);
-            if ok == 0 {
-                let err = ffi::GetLastError();
-                eprintln!("handle_event[{}]: GetOverlappedResult failed, error={}", idx, err);
-                return;
-            }
-            if bytes == 0 {
-                eprintln!("handle_event[{}]: bytes==0, marking dirty (cancelled/buffer overflow)", idx);
-                rw.dirty = true;
-                rw.dirty_cooldown = Instant::now();
-            } else {
-                let len = (bytes as usize).min(rw.change_buf.len());
-                let paths = extract_watcher_paths(&rw.change_buf[..len]);
-                for (path, _action) in paths {
-                    if is_git_internal(&path) { continue; }
+            if ok != 0 {
+                if bytes == 0 {
                     rw.dirty = true;
                     rw.dirty_cooldown = Instant::now();
+                } else {
+                    let len = (bytes as usize).min(rw.change_buf.len());
+                    let paths = extract_watcher_paths(&rw.change_buf[..len]);
+                    for (path, _action) in paths {
+                        if is_git_internal(&path) { continue; }
+                        rw.dirty = true;
+                        rw.dirty_cooldown = Instant::now();
+                    }
                 }
             }
             start_watch(rw);
@@ -155,13 +150,6 @@ impl WatcherState {
             let rc = unsafe { ffi::WaitForSingleObject(self.entries[i].change_event, 0) };
             if rc == ffi::WAIT_OBJECT_0 {
                 self.handle_event(i);
-            }
-        }
-        for rw in &mut self.entries {
-            if rw.dirty {
-                rw.generation += 1;
-                rw.dirty = false;
-                self.generations.insert(rw.repo_root.clone(), rw.generation);
             }
         }
     }
@@ -397,17 +385,123 @@ mod tests {
         assert_eq!(rc, ffi::WAIT_OBJECT_0, "event should be signaled after file create");
 
         w.poll();
+        assert!(w.entries[0].dirty, "entry should be dirty after poll");
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        w.process_dirty();
         let g1 = w.generation(&p);
-        assert!(g1 > 1, "gen should have been bumped from spurious event, got {g1}");
-        assert!(!w.entries[0].dirty, "entry should not be dirty after poll");
+        assert!(g1 > 1, "gen should have been bumped from event, got {g1}");
+        assert!(!w.entries[0].dirty, "entry should not be dirty after process_dirty");
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(p.join("another_file.txt"), b"world").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         w.poll();
+        assert!(w.entries[0].dirty, "entry should be dirty after second poll");
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        w.process_dirty();
         let g2 = w.generation(&p);
-        assert!(g2 > g1, "gen should have been bumped from file detection, got {g2} vs {g1}");
-        assert!(!w.entries[0].dirty, "entry should not be dirty after second poll");
+        assert!(g2 > g1, "gen should have been bumped from second event, got {g2} vs {g1}");
+        assert!(!w.entries[0].dirty, "entry should not be dirty after second process_dirty");
+    }
+
+    #[test]
+    fn process_dirty_respects_cooldown() {
+        let mut w = WatcherState::new();
+        w.entries.push(WatchEntry {
+            repo_root: PathBuf::from("/test"),
+            dir_handle: ffi::INVALID_HANDLE_VALUE,
+            change_buf: Vec::new(),
+            change_event: std::ptr::null_mut(),
+            overlapped: unsafe { std::mem::zeroed() },
+            dirty: true,
+            dirty_cooldown: Instant::now(),
+            generation: 5,
+        });
+        w.generations.insert(PathBuf::from("/test"), 5);
+
+        // Cooldown hasn't elapsed yet - no bump
+        w.process_dirty();
+        assert_eq!(w.generation(Path::new("/test")), 5);
+        assert!(w.entries[0].dirty);
+    }
+
+    #[test]
+    fn process_dirty_skips_non_dirty() {
+        let mut w = WatcherState::new();
+        w.entries.push(WatchEntry {
+            repo_root: PathBuf::from("/a"),
+            dir_handle: ffi::INVALID_HANDLE_VALUE,
+            change_buf: Vec::new(),
+            change_event: std::ptr::null_mut(),
+            overlapped: unsafe { std::mem::zeroed() },
+            dirty: true,
+            dirty_cooldown: Instant::now() - Duration::from_millis(200),
+            generation: 1,
+        });
+        w.entries.push(WatchEntry {
+            repo_root: PathBuf::from("/b"),
+            dir_handle: ffi::INVALID_HANDLE_VALUE,
+            change_buf: Vec::new(),
+            change_event: std::ptr::null_mut(),
+            overlapped: unsafe { std::mem::zeroed() },
+            dirty: false,
+            dirty_cooldown: Instant::now(),
+            generation: 10,
+        });
+        w.generations.insert(PathBuf::from("/a"), 1);
+        w.generations.insert(PathBuf::from("/b"), 10);
+
+        w.process_dirty();
+        assert_eq!(w.generation(Path::new("/a")), 2, "dirty entry should bump");
+        assert_eq!(w.generation(Path::new("/b")), 10, "non-dirty entry should not bump");
+    }
+
+    #[test]
+    fn extract_alignment_padding() {
+        let name_bytes: Vec<u16> = "a.txt\0".encode_utf16().collect();
+        let name_byte_len = (name_bytes.len() * 2) as u32;
+        let mut buf = Vec::new();
+        let rec_len = 12 + name_byte_len;
+        let aligned = if rec_len % 4 == 0 { rec_len } else { rec_len + 4 - (rec_len % 4) };
+        buf.extend_from_slice(&aligned.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&name_byte_len.to_le_bytes());
+        for c in &name_bytes { buf.extend_from_slice(&c.to_le_bytes()); }
+        while buf.len() < aligned as usize { buf.push(0xAA); }
+
+        let paths = extract_watcher_paths(&buf);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0, "a.txt");
+    }
+
+    #[test]
+    fn extract_action_codes_preserved() {
+        for action in [1u32, 2, 3, 4, 5] {
+            let name_bytes: Vec<u16> = "f.txt\0".encode_utf16().collect();
+            let name_byte_len = (name_bytes.len() * 2) as u32;
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            buf.extend_from_slice(&action.to_le_bytes());
+            buf.extend_from_slice(&name_byte_len.to_le_bytes());
+            for c in &name_bytes { buf.extend_from_slice(&c.to_le_bytes()); }
+
+            let paths = extract_watcher_paths(&buf);
+            assert_eq!(paths.len(), 1, "action={action}");
+            assert_eq!(paths[0].1, action, "action={action}");
+        }
+    }
+
+    #[test]
+    fn extract_zero_length_name_breaks() {
+        // Empty name shouldn't produce a path entry (name_len < 2)
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        let paths = extract_watcher_paths(&buf);
+        assert_eq!(paths.len(), 0);
     }
 }

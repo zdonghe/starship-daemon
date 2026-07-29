@@ -1,3 +1,4 @@
 target/
 perf/target/
 bench_results.md
+timing.log

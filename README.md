@@ -37,7 +37,9 @@ Hot reloading is supported.
 
 ## Caching
 
-The daemon caches prompts by (cwd, exit code, keymap, terminal width, git ref mtimes, config mtime, watcher generation). 
+The daemon caches prompts by (cwd, exit code, keymap, terminal width, config mtime, watcher generation). 
+
+The watcher tracks the entire directory, and will get updated/notified if something in .git changes. Since we don't have module specific cache, it doesn't matter if there's a file modification or a `git checkout`, either way, we need to recompute `git status`.
 
 Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 

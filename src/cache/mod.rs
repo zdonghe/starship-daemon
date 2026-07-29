@@ -21,14 +21,13 @@ pub struct CacheKey {
     pub status_code: i32,
     pub keymap: String,
     pub terminal_width: usize,
-    pub time_bucket: u64,
     pub config_mtime: u64,
     pub watcher_gen: u64,
 }
 
-pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path, _git_dir: Option<&Path>, watcher_gen: u64) -> CacheKey {
+pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, config_path: &Path, _git_dir: Option<&Path>, watcher_gen: u64) -> CacheKey {
     CacheKey {
-        cwd: cwd.to_path_buf(), status_code, keymap: keymap.to_string(), terminal_width, time_bucket,
+        cwd: cwd.to_path_buf(), status_code, keymap: keymap.to_string(), terminal_width,
         config_mtime: get_mtime_ns(config_path),
         watcher_gen,
     }
@@ -61,7 +60,7 @@ mod tests {
     fn cache_key_equality_reflexive() {
         let k = CacheKey {
             cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            time_bucket: 0, config_mtime: 5, watcher_gen: 0,
+            config_mtime: 5, watcher_gen: 0,
         };
         assert_eq!(k, k);
     }
@@ -70,11 +69,11 @@ mod tests {
     fn cache_key_equality_different_cwd_not_equal() {
         let k1 = CacheKey {
             cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            time_bucket: 0, config_mtime: 5, watcher_gen: 0,
+            config_mtime: 5, watcher_gen: 0,
         };
         let k2 = CacheKey {
             cwd: PathBuf::from("/b"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            time_bucket: 0, config_mtime: 5, watcher_gen: 0,
+            config_mtime: 5, watcher_gen: 0,
         };
         assert_ne!(k1, k2);
     }
@@ -82,11 +81,10 @@ mod tests {
     #[test]
     fn compute_cache_key_no_git_dir() {
         let dir = tempfile::TempDir::new().unwrap();
-        let k = compute_cache_key(dir.path(), 0, "vi", 120, 0, Path::new("__nonexistent_config__"), None, 0);
+        let k = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
         assert_eq!(k.status_code, 0);
         assert_eq!(k.keymap, "vi");
         assert_eq!(k.terminal_width, 120);
-        assert_eq!(k.time_bucket, 0);
         assert_eq!(k.config_mtime, 0);
         assert_eq!(k.watcher_gen, 0);
     }
@@ -94,23 +92,23 @@ mod tests {
     #[test]
     fn compute_cache_key_different_status_code_differentiates() {
         let dir = tempfile::TempDir::new().unwrap();
-        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, 0, Path::new("__nonexistent_config__"), None, 0);
-        let k2 = compute_cache_key(dir.path(), 1, "vi", 120, 0, Path::new("__nonexistent_config__"), None, 0);
+        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let k2 = compute_cache_key(dir.path(), 1, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn compute_cache_key_different_watcher_gen_differentiates() {
         let dir = tempfile::TempDir::new().unwrap();
-        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, 0, Path::new("__nonexistent_config__"), None, 0);
-        let k2 = compute_cache_key(dir.path(), 0, "vi", 120, 0, Path::new("__nonexistent_config__"), None, 5);
+        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let k2 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 5);
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn compute_cache_key_with_nonexistent_cwd_still_works() {
         let bad_cwd = Path::new("__nonexistent_cwd__");
-        let k = compute_cache_key(bad_cwd, 0, "vi", 120, 0, Path::new("__nonexistent_config__"), None, 0);
+        let k = compute_cache_key(bad_cwd, 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
         assert_eq!(k.config_mtime, 0);
     }
 }

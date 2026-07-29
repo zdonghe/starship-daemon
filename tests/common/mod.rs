@@ -59,7 +59,7 @@ impl TestRepo {
     }
 
     pub fn cache_key(&self, config_path: &Path) -> CacheKey {
-        cache::compute_cache_key(self.path(), 0, "vi", 120, 0, config_path, None, 0)
+        cache::compute_cache_key(self.path(), 0, "vi", 120, config_path, None, 0)
     }
 }
 

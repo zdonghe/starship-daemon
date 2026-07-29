@@ -15,6 +15,12 @@ fn settle_watcher() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 }
 
+fn poll_and_process(w: &mut WatcherState) {
+    w.poll();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    w.process_dirty();
+}
+
 #[test]
 fn ensure_inserts_generation_on_success() {
     let repo = TestRepo::new();
@@ -45,7 +51,7 @@ fn ensure_is_idempotent() {
 }
 
 #[test]
-fn poll_bumps_generation_on_file_change() {
+fn poll_process_bumps_generation_on_file_change() {
     let repo = TestRepo::new();
     let p = repopath(&repo);
 
@@ -54,19 +60,19 @@ fn poll_bumps_generation_on_file_change() {
 
     write_file(&repo, "trigger", "hello");
     settle_watcher();
-    w.poll();
+    poll_and_process(&mut w);
     let g1 = w.generation(&p);
     assert!(g1 > 1, "generation should have been bumped after file write, got {g1}");
 
     write_file(&repo, "trigger2", "world");
     settle_watcher();
-    w.poll();
+    poll_and_process(&mut w);
     let g2 = w.generation(&p);
     assert!(g2 > g1, "generation should bump again after second file write, got {g2} vs {g1}");
 }
 
 #[test]
-fn poll_detects_file_creation() {
+fn poll_process_detects_file_creation() {
     let repo = TestRepo::new();
     let p = repopath(&repo);
 
@@ -75,13 +81,13 @@ fn poll_detects_file_creation() {
 
     write_file(&repo, "new.txt", "world");
     settle_watcher();
-    w.poll();
+    poll_and_process(&mut w);
     let g1 = w.generation(&p);
     assert!(g1 > 1, "gen should have been bumped from file creation, got {g1}");
 
     write_file(&repo, "another.txt", "more");
     settle_watcher();
-    w.poll();
+    poll_and_process(&mut w);
     let g2 = w.generation(&p);
     assert!(g2 > g1, "gen should have been bumped from second file creation, got {g2} vs {g1}");
 }

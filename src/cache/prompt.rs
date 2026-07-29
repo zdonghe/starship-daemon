@@ -404,7 +404,7 @@ mod tests {
             [character]
             format = ">"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let expected = render_prompt_with_config(&ctx, None, &cfg);
@@ -439,7 +439,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let full = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -469,7 +469,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -514,7 +514,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _full = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -555,7 +555,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -601,7 +601,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -643,7 +643,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);

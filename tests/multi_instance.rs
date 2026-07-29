@@ -51,7 +51,7 @@ impl MultiRepoHarness {
         let key = cache::compute_cache_key(
             self.a.path(), 0, "vi", 120,
             self.config_path.as_path(),
-            gd.as_deref(), gen_val,
+            gen_val,
         );
         let ctx = RenderContext {
             cwd: self.a.path().to_path_buf(),
@@ -67,7 +67,7 @@ impl MultiRepoHarness {
         let key = cache::compute_cache_key(
             self.b.path(), 0, "vi", 120,
             self.config_path.as_path(),
-            gd.as_deref(), gen_val,
+            gen_val,
         );
         let ctx = RenderContext {
             cwd: self.b.path().to_path_buf(),

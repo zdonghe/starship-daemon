@@ -108,7 +108,7 @@ fn main() {
             keymap: "vi".to_string(),
         };
         let warm_key = cache::compute_cache_key(
-            Path::new("."), 0, "vi", 120, &config_path, None, 0,
+            Path::new("."), 0, "vi", 120, &config_path, 0,
         );
         let _ = cache::render_cached(&warm_ctx, None, &cached_config, &warm_key, &mut lru);
     }
@@ -205,7 +205,7 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     watcher.poll();
     watcher.process_dirty();
     let watcher_gen = repo_root.map(|r| watcher.generation(r)).unwrap_or(0);
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, config_path.as_path(), git_dir.as_deref(), watcher_gen);
+    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, config_path.as_path(), watcher_gen);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);

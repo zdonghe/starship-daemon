@@ -5,8 +5,6 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use starship_daemon::cache::{self, CacheKey};
-
 pub const SLEEP_MS: u64 = 15;
 
 pub fn git(repo: &Path, args: &[&str]) {
@@ -58,9 +56,6 @@ impl TestRepo {
         std::fs::remove_file(self.path().join(name)).unwrap();
     }
 
-    pub fn cache_key(&self, config_path: &Path) -> CacheKey {
-        cache::compute_cache_key(self.path(), 0, "vi", 120, config_path, None, 0)
-    }
 }
 
 pub fn no_config() -> PathBuf {

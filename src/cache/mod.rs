@@ -25,7 +25,7 @@ pub struct CacheKey {
     pub watcher_gen: u64,
 }
 
-pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, config_path: &Path, _git_dir: Option<&Path>, watcher_gen: u64) -> CacheKey {
+pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, config_path: &Path, watcher_gen: u64) -> CacheKey {
     CacheKey {
         cwd: cwd.to_path_buf(), status_code, keymap: keymap.to_string(), terminal_width,
         config_mtime: get_mtime_ns(config_path),
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn compute_cache_key_no_git_dir() {
         let dir = tempfile::TempDir::new().unwrap();
-        let k = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let k = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"),  0);
         assert_eq!(k.status_code, 0);
         assert_eq!(k.keymap, "vi");
         assert_eq!(k.terminal_width, 120);
@@ -92,23 +92,23 @@ mod tests {
     #[test]
     fn compute_cache_key_different_status_code_differentiates() {
         let dir = tempfile::TempDir::new().unwrap();
-        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
-        let k2 = compute_cache_key(dir.path(), 1, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"),  0);
+        let k2 = compute_cache_key(dir.path(), 1, "vi", 120, Path::new("__nonexistent_config__"),  0);
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn compute_cache_key_different_watcher_gen_differentiates() {
         let dir = tempfile::TempDir::new().unwrap();
-        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
-        let k2 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), None, 5);
+        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"),  0);
+        let k2 = compute_cache_key(dir.path(), 0, "vi", 120, Path::new("__nonexistent_config__"),  5);
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn compute_cache_key_with_nonexistent_cwd_still_works() {
         let bad_cwd = Path::new("__nonexistent_cwd__");
-        let k = compute_cache_key(bad_cwd, 0, "vi", 120, Path::new("__nonexistent_config__"), None, 0);
+        let k = compute_cache_key(bad_cwd, 0, "vi", 120, Path::new("__nonexistent_config__"),  0);
         assert_eq!(k.config_mtime, 0);
     }
 }

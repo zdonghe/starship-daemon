@@ -14,7 +14,6 @@ lru = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
-gix = { version = "0.85", features = ["max-performance-safe", "status", "revision"] }
 
 [[bin]]
 name = "starship-daemon"

@@ -392,23 +392,19 @@ mod tests {
         std::fs::write(p.join("newfile.txt"), b"hello").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        // Manually check event and handle it
         let ev = w.entries[0].change_event;
         let rc = unsafe { ffi::WaitForSingleObject(ev, 0) };
         assert_eq!(rc, ffi::WAIT_OBJECT_0, "event should be signaled after file create");
 
-        // First poll: processes bytes=0 spurious completion, marks dirty, issues new RW
         w.poll();
         let g1 = w.generation(&p);
         assert!(g1 > 1, "gen should have been bumped from spurious event, got {g1}");
         assert!(!w.entries[0].dirty, "entry should not be dirty after poll");
 
-        // Create file AFTER a new RW is pending (so RW detects it)
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(p.join("another_file.txt"), b"world").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        // Poll again — new RW completed with actual notification data
         w.poll();
         let g2 = w.generation(&p);
         assert!(g2 > g1, "gen should have been bumped from file detection, got {g2} vs {g1}");

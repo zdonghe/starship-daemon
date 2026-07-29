@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use starship_daemon::prompt::{self, RenderContext};
+use starship_daemon::cache::{self, RenderContext};
 
 const N: u32 = 10;
 
@@ -22,7 +22,7 @@ fn bench_one_repo(
         status_code: 0,
         keymap: "viins".into(),
     };
-    let _ = prompt::render_prompt_with_config(&warm_ctx, git_dir.as_deref(), config);
+    let _ = cache::render_prompt_with_config(&warm_ctx, git_dir.as_deref(), config);
 
     let trials: Vec<(&str, &str)> = vec![
         ("full prompt", full_format),
@@ -50,7 +50,7 @@ fn bench_one_repo(
                 toml::Value::String(mod_fmt.to_string()),
             );
             let t = Instant::now();
-            let _ = prompt::render_prompt_with_config(&ctx, git_dir.as_deref(), &mod_cfg);
+            let _ = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &mod_cfg);
             total += t.elapsed();
         }
         let avg_us = total.as_secs_f64() / N as f64 * 1_000_000.0;
@@ -83,8 +83,8 @@ fn bench_one_repo(
 fn main() { bench_cross_repo(); }
 
 fn bench_cross_repo() {
-    let config_path = prompt::default_config_path();
-    let config = prompt::read_config(&config_path);
+    let config_path = cache::default_config_path();
+    let config = cache::read_config(&config_path);
     let full_format: String = config
         .get("format")
         .and_then(|v| v.as_str())

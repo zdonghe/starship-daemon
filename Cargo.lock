@@ -3039,7 +3039,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "starship"
 version = "1.26.0"
-source = "git+https://github.com/zdonghe/starship?branch=main#a64af437d06ef63b5633a01c0733c15457e6ba83"
+source = "git+https://github.com/zdonghe/starship?branch=main#35b70d2d35e4088a8620f29482b2e84f97de3834"
 dependencies = [
  "clap",
  "clap_complete",

@@ -1,4 +1,4 @@
-use starship_daemon::watcher::WatcherState;
+use starship_daemon::watch::WatcherState;
 
 mod common;
 use common::TestRepo;

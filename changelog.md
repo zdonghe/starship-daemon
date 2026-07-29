@@ -16,9 +16,11 @@ keymap cachekey does not seem to work
 GetFileAttributesExW(..., 1, ...) — the earlier std::fs::metadata. GetFileAttributesExW i believe is faster
 
 perhaps just isolate the time module, as that is the one that invalidates often
+- agent is working on that
 
 i think that the method is to split up the src even more, to separate the cache system
 
 some sort of api that allows benches to access stuff more easily
 
 make sure every test in starship git status passes
+- use it to run through some pass versions that i'm pretty sure work pretty decently

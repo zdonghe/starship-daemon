@@ -1,9 +1,7 @@
-use std::path::Path;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use starship_daemon::prompt::{self, CacheKey};
+use starship_daemon::cache::{self, CacheKey};
 
 mod common;
 use common::*;
@@ -44,18 +42,6 @@ macro_rules! assert_only_changed {
         }
     };
 }
-
-fn current_branch(repo: &Path) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .expect("git rev-parse failed");
-    assert!(out.status.success());
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
 // ==== Field identity tests ====
 
 #[test]
@@ -71,8 +57,8 @@ fn cwd_field_differentiates_directories() {
 fn status_code_field_differentiates_exit_codes() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
-    let k2 = prompt::compute_cache_key(r.path(), 1, "vi", 120, 0, &cfg, None, 0);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = cache::compute_cache_key(r.path(), 1, "vi", 120, 0, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -80,8 +66,8 @@ fn status_code_field_differentiates_exit_codes() {
 fn keymap_field_differentiates_keymaps() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
-    let k2 = prompt::compute_cache_key(r.path(), 0, "emacs", 120, 0, &cfg, None, 0);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = cache::compute_cache_key(r.path(), 0, "emacs", 120, 0, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -89,8 +75,8 @@ fn keymap_field_differentiates_keymaps() {
 fn terminal_width_field_differentiates_widths() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
-    let k2 = prompt::compute_cache_key(r.path(), 0, "vi", 80, 0, &cfg, None, 0);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 80, 0, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -98,8 +84,8 @@ fn terminal_width_field_differentiates_widths() {
 fn time_bucket_field_differentiates_buckets() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
-    let k2 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 1, &cfg, None, 0);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 1, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -272,104 +258,16 @@ fn remote_mtime_changes_on_git_fetch() {
     settle();
 
     let cfg = no_config();
-    let before = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     settle();
 
     git(&wt_a, &["fetch"]);
     settle();
 
-    let after = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     assert_changed(&before, &after, "remote_mtime");
     assert_unchanged(&before, &after, "index_mtime");
 
-}
-
-// ==== End-to-end render + cache integration test ====
-
-#[test]
-fn render_output_reflects_git_status_changes() {
-    let r = TestRepo::new();
-    let cfg = toml::Table::new();
-
-    let ctx = |cwd: &Path| prompt::RenderContext {
-        cwd: cwd.to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
-
-    let git_dir = starship_daemon::find_git_dir(r.path());
-    let out1 = prompt::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
-    assert!(!out1.is_empty(), "first render should produce output");
-
-    r.write("untracked.txt", "new");
-    settle();
-    let out2 = prompt::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
-    assert!(!out2.is_empty());
-    assert_ne!(out1, out2, "render output should change after file create");
-
-    r.git(&["add", "untracked.txt"]);
-    settle();
-    let out3 = prompt::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
-    assert!(!out3.is_empty());
-    assert_ne!(out2, out3, "render output should change after git add");
-
-    r.git(&["commit", "-m", "add untracked.txt"]);
-    settle();
-    let out4 = prompt::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
-    assert!(!out4.is_empty());
-}
-
-#[test]
-fn render_output_is_deterministic() {
-    let r = TestRepo::new();
-    let cfg = toml::Table::new();
-    let ctx = prompt::RenderContext {
-        cwd: r.path().to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
-
-    let git_dir = starship_daemon::find_git_dir(r.path());
-    let out1 = prompt::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg);
-    let out2 = prompt::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg);
-    assert_eq!(out1, out2, "same inputs should produce same render output");
-}
-
-#[test]
-fn different_cwd_produces_different_render() {
-    let r = TestRepo::new();
-    let cfg = toml::Table::new();
-
-    let nested = r.path().join("sub");
-    std::fs::create_dir_all(&nested).unwrap();
-    git(&nested, &["init"]);
-    git(&nested, &["config", "user.email", "test@test"]);
-    git(&nested, &["config", "user.name", "test"]);
-    std::fs::write(nested.join("nested.txt"), "nested").unwrap();
-    git(&nested, &["add", "nested.txt"]);
-    git(&nested, &["commit", "-m", "nested init"]);
-    settle();
-
-    let ctx_main = prompt::RenderContext {
-        cwd: r.path().to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
-    let ctx_sub = prompt::RenderContext {
-        cwd: nested.clone(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
-
-    let git_dir_main = starship_daemon::find_git_dir(r.path());
-    let git_dir_sub = starship_daemon::find_git_dir(&nested);
-    let out_main = prompt::render_prompt_with_config(&ctx_main, git_dir_main.as_deref(), &cfg);
-    let out_sub = prompt::render_prompt_with_config(&ctx_sub, git_dir_sub.as_deref(), &cfg);
-    assert_ne!(out_main, out_sub, "render output should differ for different git repos");
 }
 
 // ==== Comprehensive git operation mtime tests ====
@@ -604,14 +502,248 @@ fn git_pull_changes_remote_index_and_branch_mtime() {
     settle();
 
     let cfg = no_config();
-    let before = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
+    let before = cache::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     settle();
 
     git(&wt_a, &["pull", "--no-edit"]);
     settle();
 
-    let after = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
+    let after = cache::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     assert_changed(&before, &after, "remote_mtime");
     assert_changed(&before, &after, "index_mtime");
     assert_changed(&before, &after, "branch_mtime");
+}
+
+#[test]
+fn manual_rename_changes_only_cwd_mtime() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    r.write("rename_me.txt", "content");
+    settle();
+    let before = r.cache_key(0, &cfg);
+    std::fs::rename(r.path().join("rename_me.txt"), r.path().join("renamed.txt")).unwrap();
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_only_changed!(&before, &after, [cwd_mtime]);
+}
+
+#[test]
+fn ignored_file_still_changes_cwd_mtime() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    std::fs::write(r.path().join(".gitignore"), "ignored_*\n").unwrap();
+    r.git(&["add", ".gitignore"]);
+    r.git(&["commit", "-m", "add gitignore"]);
+    settle();
+    let before = r.cache_key(0, &cfg);
+    r.write("ignored_file.txt", "should be ignored by git");
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_changed(&before, &after, "cwd_mtime");
+}
+
+#[test]
+fn no_upstream_branch_remote_mtime_is_zero() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    r.git(&["checkout", "-b", "no-upstream"]);
+    settle();
+    let k = r.cache_key(0, &cfg);
+    assert_eq!(k.remote_mtime, 0, "branch with no upstream should have remote_mtime=0");
+}
+
+#[test]
+fn git_rebase_changes_branch_and_index_mtime() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    let base_branch = current_branch(r.path());
+    r.git(&["checkout", "-b", "rebase-feature"]);
+    r.write("feature.txt", "feature work");
+    r.git(&["add", "feature.txt"]);
+    r.git(&["commit", "-m", "feature commit"]);
+    r.git(&["checkout", &base_branch]);
+    r.write("mainline.txt", "mainline work");
+    r.git(&["add", "mainline.txt"]);
+    r.git(&["commit", "-m", "mainline commit"]);
+    settle();
+    thread::sleep(Duration::from_millis(50));
+    let before = r.cache_key(0, &cfg);
+    r.git(&["rebase", "rebase-feature"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_changed(&before, &after, "branch_mtime");
+    assert_changed(&before, &after, "index_mtime");
+}
+
+#[test]
+fn git_cherry_pick_changes_index_branch_and_cwd_mtime() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    r.write("cherry.txt", "cherry content");
+    r.git(&["add", "cherry.txt"]);
+    r.git(&["commit", "-m", "commit to cherry-pick"]);
+    let commit_hash = String::from_utf8(
+        std::process::Command::new("git").arg("-C").arg(r.path()).args(["rev-parse", "HEAD"]).output().unwrap().stdout
+    ).unwrap().trim().to_string();
+    r.git(&["checkout", "other"]);
+    settle();
+    thread::sleep(Duration::from_millis(50));
+    let before = r.cache_key(0, &cfg);
+    r.git(&["cherry-pick", &commit_hash]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_changed(&before, &after, "index_mtime");
+    assert_changed(&before, &after, "branch_mtime");
+    assert_changed(&before, &after, "cwd_mtime");
+}
+
+#[test]
+fn git_push_changes_remote_mtime() {
+    let bare = tempfile::TempDir::new().unwrap();
+    let bare_path = bare.path().join("remote.git");
+    std::fs::create_dir_all(&bare_path).unwrap();
+    git(&bare_path, &["init", "--bare"]);
+
+    let r = TestRepo::new();
+    let repo_path = r.path().to_path_buf();
+    git(&repo_path, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
+    r.write("push_me.txt", "push content");
+    r.git(&["add", "push_me.txt"]);
+    r.git(&["commit", "-m", "commit to push"]);
+    git(&repo_path, &["branch", "-M", "main"]);
+    git(&repo_path, &["push", "-u", "origin", "main"]);
+    settle();
+
+    let cfg = no_config();
+    r.write("another.txt", "more content");
+    r.git(&["add", "another.txt"]);
+    r.git(&["commit", "-m", "another commit"]);
+    settle();
+    thread::sleep(Duration::from_millis(50));
+    let before = r.cache_key(0, &cfg);
+    git(&repo_path, &["push"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_changed(&before, &after, "remote_mtime");
+}
+
+#[test]
+fn git_worktree_separate_cache_key() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    let worktree_dir = tempfile::TempDir::new().unwrap();
+    let wt_path = worktree_dir.path().join("wt");
+    r.git(&["worktree", "add", wt_path.to_str().unwrap(), "other"]);
+    settle();
+
+    let key_original = r.cache_key(0, &cfg);
+    let key_wt = cache::compute_cache_key(&wt_path, 0, "vi", 120, 0, &cfg, None, 0);
+    assert_ne!(key_original, key_wt, "worktree should have different cache key from original repo");
+
+    std::fs::write(wt_path.join("worktree_file.txt"), "worktree").unwrap();
+    settle();
+    let key_wt_after = cache::compute_cache_key(&wt_path, 0, "vi", 120, 0, &cfg, None, 0);
+    assert_ne!(key_wt, key_wt_after, "worktree cache key should change after file creation");
+}
+
+#[test]
+fn git_clean_changes_cwd_mtime() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    r.write("untracked_clean.txt", "to be cleaned");
+    settle();
+    let before = r.cache_key(0, &cfg);
+    r.git(&["clean", "-f"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_changed(&before, &after, "cwd_mtime");
+    assert_unchanged(&before, &after, "index_mtime");
+}
+
+#[test]
+fn git_gc_packs_refs_changes_branch_mtime() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    settle();
+    let before = r.cache_key(0, &cfg);
+    r.git(&["gc"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert!(before != after, "gc packs refs, branch_mtime should change (ref file deleted)");
+}
+
+#[test]
+fn git_config_change_does_not_change_mtimes() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    settle();
+    let before = r.cache_key(0, &cfg);
+    r.git(&["config", "test.dummy", "value"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn git_log_with_patch_is_read_only() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    settle();
+    let before = r.cache_key(0, &cfg);
+    r.git(&["log", "-p", "--all"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn git_status_refreshes_index() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    settle();
+    let before = r.cache_key(0, &cfg);
+    r.git(&["status", "--porcelain"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_changed(&before, &after, "index_mtime");
+    assert_unchanged(&before, &after, "cwd_mtime");
+    assert_unchanged(&before, &after, "branch_mtime");
+}
+
+#[test]
+fn git_push_new_branch_changes_only_remote_mtime() {
+    let cfg = no_config();
+    let bare = tempfile::TempDir::new().unwrap();
+    let bare_path = bare.path().join("remote.git");
+    std::fs::create_dir_all(&bare_path).unwrap();
+    git(&bare_path, &["init", "--bare"]);
+
+    let r = TestRepo::new();
+    let repo_path = r.path().to_path_buf();
+    git(&repo_path, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
+    git(&repo_path, &["branch", "-M", "main"]);
+    git(&repo_path, &["push", "-u", "origin", "main"]);
+    r.git(&["checkout", "-b", "other-branch"]);
+    r.write("other.txt", "other");
+    r.git(&["add", "other.txt"]);
+    r.git(&["commit", "-m", "other commit"]);
+    settle();
+    thread::sleep(Duration::from_millis(50));
+    let before = r.cache_key(0, &cfg);
+    git(&repo_path, &["push", "-u", "origin", "other-branch"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_only_changed!(&before, &after, [remote_mtime]);
+}
+
+#[test]
+fn git_archive_is_read_only() {
+    let r = TestRepo::new();
+    let cfg = no_config();
+    settle();
+    let before = r.cache_key(0, &cfg);
+    r.git(&["archive", "--format=tar", "HEAD"]);
+    settle();
+    let after = r.cache_key(0, &cfg);
+    assert_eq!(before, after);
 }

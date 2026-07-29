@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
-use starship_daemon::prompt::{self, CacheKey, RenderContext};
+use starship_daemon::cache::{self, CacheKey, RenderContext};
 use starship_daemon::find_git_dir;
 
 /// Cold render to force starship's internal cache population
@@ -12,13 +12,13 @@ fn render_cold(cwd: &PathBuf) -> String {
         status_code: 0,
         keymap: "viins".to_string(),
     };
-    prompt::render_prompt(&ctx, None)
+    cache::render_prompt(&ctx, None)
 }
 
 fn main() {
     let cwd = std::env::current_dir().unwrap();
-    let config_path = prompt::default_config_path();
-    let config = prompt::load_config(&config_path).unwrap();
+    let config_path = cache::default_config_path();
+    let config = cache::load_config(&config_path).unwrap();
 
     println!("=== starship-daemon hot-path benchmarks ===\n");
     println!("cwd:        {:?}", cwd);
@@ -31,7 +31,7 @@ fn main() {
     println!("(warm-up render done)\n");
 
     // ---------- cache hit: HashMap::get ----------
-    let key = prompt::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0);
+    let key = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0);
     let mut cache: HashMap<CacheKey, String> = HashMap::new();
     cache.insert(key.clone(), "dummy".into());
 
@@ -44,9 +44,9 @@ fn main() {
     // ---------- cache key computation ----------
     let n = 100;
     let start = Instant::now();
-    for _ in 0..n { let _ = prompt::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0); }
+    for _ in 0..n { let _ = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0); }
     let key_us = start.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
-    println!("  compute_cache_key (6+ stats):        {:>8.1} µs", key_us);
+    println!("  compute_cache_key (6+ stats):        {:>8.1} us", key_us);
 
     // ---------- find_git_dir ----------
     let n = 10_000;
@@ -68,7 +68,7 @@ fn main() {
             keymap: "viins".to_string(),
         };
         let start = Instant::now();
-        let _ = prompt::render_prompt(&ctx, None);
+        let _ = cache::render_prompt(&ctx, None);
         let elapsed = start.elapsed().as_nanos() as f64 / 1_000_000.0;
         if i >= 1 { total += elapsed; } // skip first (filesystem cold cache)
     }
@@ -76,7 +76,7 @@ fn main() {
     println!("  render_prompt full:                  {:>8.1} ms", avg_ms);
 
     println!("\n--- summary ---");
-    println!("  cache hit (key + lookup):             {:>8.1} µs", key_us + hit_ns / 1000.0);
+    println!("  cache hit (key + lookup):             {:>8.1} us", key_us + hit_ns / 1000.0);
     println!("  cache miss (full render):             {:>8.1} ms", avg_ms);
     println!("  render is {:>6.0}x slower than cache hit", avg_ms * 1000.0 / (key_us + hit_ns / 1000.0));
 }

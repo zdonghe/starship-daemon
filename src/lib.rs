@@ -4,9 +4,9 @@ use std::sync::Mutex;
 
 pub const PIPE_NAME: &str = r"\\.\pipe\starship-daemon";
 
+pub mod cache;
 pub mod ffi;
-pub mod prompt;
-pub mod watcher;
+pub mod watch;
 
 fn find_git_dir_uncached(cwd: &Path) -> Option<PathBuf> {
     for d in cwd.ancestors() {

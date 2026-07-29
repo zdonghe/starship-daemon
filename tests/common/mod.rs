@@ -5,7 +5,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use starship_daemon::prompt::{self, CacheKey};
+use starship_daemon::cache::{self, CacheKey};
 
 pub const SLEEP_MS: u64 = 15;
 
@@ -59,10 +59,21 @@ impl TestRepo {
     }
 
     pub fn cache_key(&self, time_bucket: u64, config_path: &Path) -> CacheKey {
-        prompt::compute_cache_key(self.path(), 0, "vi", 120, time_bucket, config_path, None, 0)
+        cache::compute_cache_key(self.path(), 0, "vi", 120, time_bucket, config_path, None, 0)
     }
 }
 
 pub fn no_config() -> PathBuf {
     PathBuf::from("__nonexistent_config__")
+}
+
+pub fn current_branch(repo: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("git rev-parse failed");
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }

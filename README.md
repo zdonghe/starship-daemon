@@ -37,7 +37,7 @@ Hot reloading is supported.
 
 ## Caching
 
-The daemon caches prompts by (cwd, exit code, terminal width, git ref mtimes, config mtime). 
+The daemon caches prompts by (cwd, exit code, keymap, terminal width, git ref mtimes, config mtime, watcher generation). 
 
 Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 
@@ -66,8 +66,7 @@ The daemon uses the official `starship` crate from crates.io.
 
 ### Gix-native fork (optional)
 
-For faster git status, uncomment two blocks in `Cargo.toml` and build.
-Uncomment the `gix` dev-dep in `[dev-dependencies]` and the entire `[patch.crates-io]` block below `[[bin]]`.
+For faster git status, uncomment the `[patch.crates-io]` block in `Cargo.toml`:
 
 ```
 cargo build --release
@@ -76,7 +75,7 @@ cargo build --release
 
 ## Benchmarking
 
-Run `perf/scripts/bench-all.ps1` to reproduce results:
+Run `benches/bench-all.ps1` to reproduce results:
 
 ```powershell
 # Optional: directory to test (defaults to current)
@@ -89,7 +88,7 @@ $env:STARSHIP_CONFIG = "C:\path\to\starship.toml"
 # Optional: gix-native daemon for comparison
 $env:STARSHIP_DAEMON_PATH_GIX = "C:\path\to\starship-daemon-gix.exe"
 
-perf/scripts/bench-all.ps1
+benches/bench-all.ps1
 ```
 
 ## Future

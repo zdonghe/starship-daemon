@@ -58,8 +58,8 @@ impl TestRepo {
         std::fs::remove_file(self.path().join(name)).unwrap();
     }
 
-    pub fn cache_key(&self, time_bucket: u64, config_path: &Path) -> CacheKey {
-        cache::compute_cache_key(self.path(), 0, "vi", 120, time_bucket, config_path, None, 0)
+    pub fn cache_key(&self, config_path: &Path) -> CacheKey {
+        cache::compute_cache_key(self.path(), 0, "vi", 120, 0, config_path, None, 0)
     }
 }
 

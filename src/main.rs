@@ -1,8 +1,10 @@
-use std::collections::HashMap;
 use std::mem;
-use std::path::PathBuf;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::ffi::c_void;
-use starship_daemon::cache::{self, RenderContext};
+
+use lru::LruCache;
+use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::ffi::{self, HANDLE, DWORD, LPVOID, LPCVOID};
 use starship_daemon::watch::WatcherState;
 
@@ -11,8 +13,6 @@ const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
 const PIPE_TYPE_MESSAGE: DWORD = 4;
 const PIPE_WAIT: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
-const CACHE_TTL_MINUTES: u64 = 2;
-const CACHE_MAX_ENTRIES: usize = 10000;
 
 macro_rules! bail { ($p:expr) => { unsafe { ffi::DisconnectNamedPipe($p); return Err(()); } } }
 
@@ -88,7 +88,7 @@ fn main() {
         Some(p) => p,
         None => { eprintln!("Could not load config"); std::process::exit(1); }
     };
-    let mut prompt_cache: HashMap<cache::CacheKey, String> = HashMap::new();
+    let mut lru: LruCache<CacheKey, CachedValue> = LruCache::new(NonZeroUsize::new(256).unwrap());
     let mut cached_config = cache::read_config(&config_path);
     let mut last_cfg_mtime = cache::get_mtime_ns(&config_path);
     let wide = ffi::to_wide(starship_daemon::PIPE_NAME);
@@ -107,7 +107,10 @@ fn main() {
             status_code: 0,
             keymap: "vi".to_string(),
         };
-        let _ = cache::render_prompt_with_config(&warm_ctx, None, &cached_config);
+        let warm_key = cache::compute_cache_key(
+            Path::new("."), 0, "vi", 120, 0, &config_path, None, 0,
+        );
+        let _ = cache::render_cached(&warm_ctx, None, &cached_config, &warm_key, &mut lru);
     }
 
     let mut watcher = WatcherState::new();
@@ -121,7 +124,7 @@ fn main() {
         if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
             let idx = rc - ffi::WAIT_OBJECT_0;
             if idx == 0 {
-                let _ = handle_client(pipe, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut prompt_cache, &mut watcher);
+                let _ = handle_client(pipe, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
                 rearm_connect(pipe, &mut connect_ol, connect_event);
             } else {
                 watcher.handle_event((idx - 1) as usize);
@@ -130,15 +133,6 @@ fn main() {
             watcher.process_dirty();
         }
     }
-}
-
-
-fn current_minute() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0)
-}
-fn evict_stale(cache: &mut HashMap<cache::CacheKey, String>) {
-    let cutoff = current_minute().saturating_sub(CACHE_TTL_MINUTES);
-    cache.retain(|k, _| k.time_bucket > cutoff);
 }
 
 fn rearm_connect(pipe: HANDLE, ol: &mut ffi::OVERLAPPED, event: HANDLE) {
@@ -156,7 +150,7 @@ fn send_response(pipe: HANDLE, output: &str) {
     unsafe { ffi::FlushFileBuffers(pipe); ffi::DisconnectNamedPipe(pipe); }
 }
 
-fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, prompt_cache: &mut HashMap<cache::CacheKey, String>, watcher: &mut WatcherState) -> Result<(), ()> {
+fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> Result<(), ()> {
     let mut buf = [0u8; 8 + 32768];
     if !read_exact(pipe, &mut buf[..4]) { bail!(pipe); }
     let cwd_len = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
@@ -180,7 +174,8 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
         if p != *config_path {
             if let Some(new_cfg) = cache::load_config(&p) {
                 *config_path = new_cfg;
-                prompt_cache.clear();
+                lru.clear();
+                cache::clear_repo_cache();
                 unsafe { std::env::set_var("STARSHIP_CONFIG", req); }
                 *cached_config = cache::read_config(config_path);
                 *last_cfg_mtime = cache::get_mtime_ns(config_path);
@@ -192,7 +187,8 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     if cur_cfg_mtime != *last_cfg_mtime {
         *last_cfg_mtime = cur_cfg_mtime;
         *cached_config = cache::read_config(config_path);
-        prompt_cache.clear();
+        lru.clear();
+        cache::clear_repo_cache();
     }
 
     let tw = props.terminal_width.unwrap_or(120);
@@ -204,22 +200,14 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
         return Ok(());
     }
 
-    let tb = current_minute();
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
     if let Some(r) = repo_root { watcher.ensure(r); }
     watcher.poll();
     let watcher_gen = repo_root.map(|r| watcher.generation(r)).unwrap_or(0);
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path, git_dir.as_deref(), watcher_gen);
+    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cache::current_minute(), config_path.as_path(), git_dir.as_deref(), watcher_gen);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
-    if let Some(cached) = prompt_cache.get(&ck) {
-        send_response(pipe, cached);
-        return Ok(());
-    }
-
-    let output = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
-    prompt_cache.insert(ck, output.clone());
-    if prompt_cache.len() >= CACHE_MAX_ENTRIES { evict_stale(prompt_cache); }
+    let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);
     send_response(pipe, &output);
     Ok(())
 }

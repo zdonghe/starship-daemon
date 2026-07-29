@@ -22,7 +22,7 @@ const CHANGE_BUF_SIZE: u32 = 65536;
 fn is_git_internal(path: &str) -> bool {
     let trimmed = path.trim_start_matches('/');
     if let Some(rest) = trimmed.strip_prefix(".git/") {
-        rest != "index" && rest != "HEAD" && !rest.starts_with("refs/heads/") && !rest.starts_with("refs/remotes/") && rest != "refs/stash"
+        rest != "index" && rest != "HEAD" && !rest.starts_with("refs/heads/") && !rest.starts_with("refs/remotes/") && rest != "refs/stash" && rest != "packed-refs"
     } else {
         trimmed == ".git"
     }

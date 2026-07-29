@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Instant;
-use starship_daemon::cache::{self, CacheKey, RenderContext};
+
+use lru::LruCache;
+use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::find_git_dir;
 
 /// Cold render to force starship's internal cache population
@@ -30,23 +32,30 @@ fn main() {
     let _ = render_cold(&cwd);
     println!("(warm-up render done)\n");
 
-    // ---------- cache hit: HashMap::get ----------
-    let key = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0);
-    let mut cache: HashMap<CacheKey, String> = HashMap::new();
-    cache.insert(key.clone(), "dummy".into());
+    // ---------- cache hit: LruCache::get ----------
+    let key = cache::compute_cache_key(&cwd, 0, "viins", 120, &config_path, gd.as_deref(), 0);
+    let rendered = "dummy".to_string();
+    let segments = starship::print::ModuleCache::new();
+    let cached = CachedValue {
+        rendered,
+        segments,
+        time_bucket: cache::current_minute(),
+    };
+    let mut lru: LruCache<CacheKey, CachedValue> = LruCache::new(NonZeroUsize::new(256).unwrap());
+    lru.put(key.clone(), cached);
 
     let n = 100_000;
     let start = Instant::now();
-    for _ in 0..n { let _ = cache.get(&key); }
+    for _ in 0..n { let _ = lru.get(&key); }
     let hit_ns = start.elapsed().as_nanos() as f64 / n as f64;
-    println!("  HashMap::get:                        {:>8.1} ns", hit_ns);
+    println!("  LruCache::get:                       {:>8.1} ns", hit_ns);
 
     // ---------- cache key computation ----------
     let n = 100;
     let start = Instant::now();
-    for _ in 0..n { let _ = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0); }
+    for _ in 0..n { let _ = cache::compute_cache_key(&cwd, 0, "viins", 120, &config, gd.as_deref(), 0); }
     let key_us = start.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
-    println!("  compute_cache_key (6+ stats):        {:>8.1} us", key_us);
+    println!("  compute_cache_key (2 stats):         {:>8.1} us", key_us);
 
     // ---------- find_git_dir ----------
     let n = 10_000;

@@ -1,11 +1,9 @@
 use std::path::{Path, PathBuf};
 
 pub mod config;
-pub mod git;
 pub mod prompt;
 
 pub use config::*;
-pub use git::*;
 pub use prompt::*;
 
 pub fn get_mtime_ns(p: &Path) -> u64 {
@@ -24,22 +22,13 @@ pub struct CacheKey {
     pub keymap: String,
     pub terminal_width: usize,
     pub time_bucket: u64,
-    pub cwd_mtime: u64,
-    pub index_mtime: u64,
-    pub branch_mtime: u64,
-    pub remote_mtime: u64,
     pub config_mtime: u64,
     pub watcher_gen: u64,
 }
 
-pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path, git_dir: Option<&Path>, watcher_gen: u64) -> CacheKey {
-    let git_dir: Option<PathBuf> = git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(cwd));
-    let (br_mtime, rr_mtime) = git_dir.as_ref().map(|d| get_branch_ref_mtimes(d)).unwrap_or((0, 0));
+pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path, _git_dir: Option<&Path>, watcher_gen: u64) -> CacheKey {
     CacheKey {
         cwd: cwd.to_path_buf(), status_code, keymap: keymap.to_string(), terminal_width, time_bucket,
-        cwd_mtime: get_mtime_ns(cwd),
-        index_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("index"))).unwrap_or(0),
-        branch_mtime: br_mtime, remote_mtime: rr_mtime,
         config_mtime: get_mtime_ns(config_path),
         watcher_gen,
     }
@@ -67,8 +56,7 @@ mod tests {
     fn cache_key_equality_reflexive() {
         let k = CacheKey {
             cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            time_bucket: 0, cwd_mtime: 1, index_mtime: 2, branch_mtime: 3, remote_mtime: 4,
-            config_mtime: 5, watcher_gen: 0,
+            time_bucket: 0, config_mtime: 5, watcher_gen: 0,
         };
         assert_eq!(k, k);
     }
@@ -77,13 +65,11 @@ mod tests {
     fn cache_key_equality_different_cwd_not_equal() {
         let k1 = CacheKey {
             cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            time_bucket: 0, cwd_mtime: 1, index_mtime: 2, branch_mtime: 3, remote_mtime: 4,
-            config_mtime: 5, watcher_gen: 0,
+            time_bucket: 0, config_mtime: 5, watcher_gen: 0,
         };
         let k2 = CacheKey {
             cwd: PathBuf::from("/b"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            time_bucket: 0, cwd_mtime: 1, index_mtime: 2, branch_mtime: 3, remote_mtime: 4,
-            config_mtime: 5, watcher_gen: 0,
+            time_bucket: 0, config_mtime: 5, watcher_gen: 0,
         };
         assert_ne!(k1, k2);
     }
@@ -97,10 +83,6 @@ mod tests {
         assert_eq!(k.keymap, "vi");
         assert_eq!(k.terminal_width, 120);
         assert_eq!(k.time_bucket, 0);
-        assert!(k.cwd_mtime > 0, "cwd_mtime should be > 0 for existing dir");
-        assert_eq!(k.index_mtime, 0, "no index without git dir");
-        assert_eq!(k.branch_mtime, 0);
-        assert_eq!(k.remote_mtime, 0);
         assert_eq!(k.config_mtime, 0);
         assert_eq!(k.watcher_gen, 0);
     }
@@ -128,6 +110,6 @@ mod tests {
         let cfg = Path::new("__nonexistent_config__");
         let bad_cwd = Path::new("__nonexistent_cwd__");
         let k = compute_cache_key(bad_cwd, 0, "vi", 120, 0, cfg, None, 0);
-        assert_eq!(k.cwd_mtime, 0);
+        assert_eq!(k.config_mtime, 0);
     }
 }

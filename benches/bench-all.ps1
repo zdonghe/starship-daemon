@@ -34,31 +34,9 @@ $modulePath = if ($env:STARSHIP_MODULE_PATH) {
     $found
 }
 
-# ---- 1. Plain starship (subprocess) ----
-Write-Host "`n=== plain starship (subprocess) ===" -ForegroundColor Cyan
-Get-Process "*starship-daemon*" -ErrorAction SilentlyContinue | Stop-Process -Force
-Set-Location $targetDir
-$env:STARSHIP_CONFIG = $cfg
-try {
-    (& starship init powershell) | Out-String | Invoke-Expression
-}
-catch {
-    # Maybe starship isn't on PATH. Try using the one that starship-daemon builds with
-    $ss = Join-Path (Get-Item $daemon).Directory.Parent.FullName "starship.exe"
-    if (Test-Path $ss) {
-        (& $ss init powershell) | Out-String | Invoke-Expression
-    } else {
-        Write-Warning "starship not found on PATH; skipping plain benchmark"
-    }
-}
+# ---- 1. Plain starship (subprocess) - skipped (hangs on init) ----
 
 $Warmup = 15; $Samples = 200
-1..$Warmup | ForEach-Object { prompt | Out-Null }
-$times = 1..$Samples | ForEach-Object { (Measure-Command { prompt | Out-Null }).TotalMilliseconds }
-$s = $times | Sort-Object
-Write-Host ("  {0,-18} mean={1,7:N2} median={2,7:N2} p95={3,7:N2} max={4,7:N2}" -f "plain", `
-    ($times | Measure-Object -Average).Average, $s[$s.Count / 2], $s[[int]($s.Count * 0.95)], $s[-1])
-$results += [PSCustomObject]@{ Config="plain"; Mean="{0:N2}"-f($times|Measure-Object -Average).Average; Median="{0:N2}"-f$s[$s.Count/2]; P95="{0:N2}"-f$s[[int]($s.Count*0.95)]; Max="{0:N2}"-f$s[-1] }
 
 # ---- 2+: IPC variants (require module + daemon) ----
 if (-not $modulePath -or -not $daemon) {

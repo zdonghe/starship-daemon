@@ -66,7 +66,13 @@ pub struct WatchEntry {
 impl Drop for WatchEntry {
     fn drop(&mut self) {
         unsafe {
-            ffi::CloseHandle(self.dir_handle);
+            if self.dir_handle != ffi::INVALID_HANDLE_VALUE {
+                if ffi::CancelIoEx(self.dir_handle, &mut self.overlapped as *mut _ as *mut c_void) != 0 {
+                    let mut bytes: DWORD = 0;
+                    let _ = ffi::GetOverlappedResult(self.dir_handle, &mut self.overlapped as *mut _ as *mut c_void, &mut bytes, 1);
+                }
+                ffi::CloseHandle(self.dir_handle);
+            }
             ffi::CloseHandle(self.change_event);
         }
     }

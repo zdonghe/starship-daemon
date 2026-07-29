@@ -1,3 +1,4 @@
+use starship_daemon::ffi;
 use starship_daemon::watch::WatcherState;
 
 mod common;
@@ -90,4 +91,25 @@ fn poll_process_detects_file_creation() {
     poll_and_process(&mut w);
     let g2 = w.generation(&p);
     assert!(g2 > g1, "gen should have been bumped from second file creation, got {g2} vs {g1}");
+}
+
+#[test]
+fn cancel_io_is_needed_readdirectorychangesw_pending_at_drop() {
+    let repo = TestRepo::new();
+    let p = repopath(&repo);
+
+    let mut w = WatcherState::new();
+    w.ensure(&p);
+
+    // After ensure, ReadDirectoryChangesW is submitted asynchronously.
+    // change_event is a manual-reset event, initially unsignaled.
+    // Since no change has occurred yet, the IO completion hasn't fired.
+    // Overlapped IO is pending — CancelIoEx is required before CloseHandle.
+    let rc = unsafe { ffi::WaitForSingleObject(w.entries[0].change_event, 0) };
+
+    assert_eq!(rc, ffi::WAIT_TIMEOUT,
+        "ReadDirectoryChangesW unexpectedly completed immediately (rc={rc}). \
+         IO should be pending. Without CancelIoEx, CloseHandle in drop races with it.");
+
+    // w is dropped here. CancelIoEx + GetOverlappedResult ensures safety.
 }

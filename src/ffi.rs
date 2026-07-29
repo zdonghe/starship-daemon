@@ -50,4 +50,5 @@ unsafe extern "system" {
     pub fn FlushFileBuffers(h: HANDLE) -> BOOL;
     pub fn GetLastError() -> DWORD;
     pub fn PeekNamedPipe(h: HANDLE, buf: LPVOID, buf_size: DWORD, bytes_read: LPDWORD, total_avail: LPDWORD, bytes_left: LPDWORD) -> BOOL;
+    pub fn CancelIoEx(h: HANDLE, overlapped: *mut c_void) -> BOOL;
 }

@@ -27,4 +27,8 @@ why tf do benches require recompilation
 
 why did bust dir disappear?
 
+how does multi instance work?
+
+do we just persistently watch repo's/folder handles, forever? gc approach from git-fast (introduces gc though)
+
 

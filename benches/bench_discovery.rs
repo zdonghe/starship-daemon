@@ -80,7 +80,8 @@ fn bench_one_repo(
     }
 }
 
-#[test]
+fn main() { bench_cross_repo(); }
+
 fn bench_cross_repo() {
     let config_path = prompt::default_config_path();
     let config = prompt::read_config(&config_path);

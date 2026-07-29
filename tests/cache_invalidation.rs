@@ -1,75 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use starship_daemon::prompt::{self, CacheKey};
 
-const SLEEP_MS: u64 = 15;
-
-fn git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .expect("git command failed");
-    assert!(
-        out.status.success(),
-        "git {} failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-fn settle() {
-    thread::sleep(Duration::from_millis(SLEEP_MS));
-}
-
-struct TestRepo {
-    dir: tempfile::TempDir,
-}
-
-impl TestRepo {
-    fn new() -> Self {
-        let dir = tempfile::TempDir::new().unwrap();
-        let repo = TestRepo { dir };
-        settle();
-        repo.git(&["init"]);
-        repo.git(&["config", "user.email", "test@test"]);
-        repo.git(&["config", "user.name", "test"]);
-        repo.write("a.txt", "hello");
-        repo.git(&["add", "a.txt"]);
-        repo.git(&["commit", "-m", "initial"]);
-        repo.git(&["branch", "other"]);
-        settle();
-        repo
-    }
-
-    fn path(&self) -> &Path {
-        self.dir.path()
-    }
-
-    fn git(&self, args: &[&str]) {
-        git(self.path(), args);
-    }
-
-    fn write(&self, name: &str, content: &str) {
-        std::fs::write(self.path().join(name), content).unwrap();
-    }
-
-    fn remove(&self, name: &str) {
-        std::fs::remove_file(self.path().join(name)).unwrap();
-    }
-
-    fn cache_key(&self, time_bucket: u64, config_path: &Path) -> CacheKey {
-        prompt::compute_cache_key(self.path(), 0, "vi", 120, time_bucket, config_path, None)
-    }
-}
-
-fn no_config() -> PathBuf {
-    PathBuf::from("__nonexistent_config__")
-}
+mod common;
+use common::*;
 
 fn assert_unchanged(before: &CacheKey, after: &CacheKey, field: &str) {
     match field {
@@ -134,8 +71,8 @@ fn cwd_field_differentiates_directories() {
 fn status_code_field_differentiates_exit_codes() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None);
-    let k2 = prompt::compute_cache_key(r.path(), 1, "vi", 120, 0, &cfg, None);
+    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = prompt::compute_cache_key(r.path(), 1, "vi", 120, 0, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -143,8 +80,8 @@ fn status_code_field_differentiates_exit_codes() {
 fn keymap_field_differentiates_keymaps() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None);
-    let k2 = prompt::compute_cache_key(r.path(), 0, "emacs", 120, 0, &cfg, None);
+    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = prompt::compute_cache_key(r.path(), 0, "emacs", 120, 0, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -152,8 +89,8 @@ fn keymap_field_differentiates_keymaps() {
 fn terminal_width_field_differentiates_widths() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None);
-    let k2 = prompt::compute_cache_key(r.path(), 0, "vi", 80, 0, &cfg, None);
+    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = prompt::compute_cache_key(r.path(), 0, "vi", 80, 0, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -161,8 +98,8 @@ fn terminal_width_field_differentiates_widths() {
 fn time_bucket_field_differentiates_buckets() {
     let r = TestRepo::new();
     let cfg = no_config();
-    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None);
-    let k2 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 1, &cfg, None);
+    let k1 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 0, &cfg, None, 0);
+    let k2 = prompt::compute_cache_key(r.path(), 0, "vi", 120, 1, &cfg, None, 0);
     assert_ne!(k1, k2);
 }
 
@@ -213,7 +150,6 @@ fn git_commit_changes_index_and_branch_mtime() {
     r.write("b.txt", "world");
     r.git(&["add", "b.txt"]);
     settle();
-    // Wait for any pending mtime to settle
     thread::sleep(Duration::from_millis(50));
     let before = r.cache_key(0, &cfg);
     r.git(&["commit", "-m", "second commit"]);
@@ -285,7 +221,6 @@ fn branch_mtime_is_redundant_with_index_mtime_on_commit() {
 fn branch_mtime_is_redundant_with_index_mtime_on_soft_reset() {
     let r = TestRepo::new();
     let cfg = no_config();
-    // Need a second commit so HEAD~1 is valid
     r.write("b.txt", "second");
     r.git(&["add", "b.txt"]);
     r.git(&["commit", "-m", "second"]);
@@ -302,7 +237,6 @@ fn branch_mtime_is_redundant_with_index_mtime_on_soft_reset() {
 
 #[test]
 fn remote_mtime_changes_on_git_fetch() {
-    // Two worktrees: push from B, fetch in A — remote_mtime changes, index does not
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -338,16 +272,14 @@ fn remote_mtime_changes_on_git_fetch() {
     settle();
 
     let cfg = no_config();
-    let before = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None);
+    let before = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     settle();
 
     git(&wt_a, &["fetch"]);
     settle();
 
-    let after = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None);
-    // remote_mtime changes because remote-tracking ref is updated
+    let after = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     assert_changed(&before, &after, "remote_mtime");
-    // index_mtime does NOT change on fetch (no merge)
     assert_unchanged(&before, &after, "index_mtime");
 
 }
@@ -514,7 +446,6 @@ fn git_stash_push_pop_changes_index_and_cwd_mtime() {
 fn git_reset_hard_changes_branch_index_and_cwd_mtime() {
     let r = TestRepo::new();
     let cfg = no_config();
-    // Two commits so HEAD~1 is valid
     r.write("b.txt", "second");
     r.git(&["add", "b.txt"]);
     r.git(&["commit", "-m", "second"]);
@@ -573,7 +504,6 @@ fn git_tag_does_not_change_mtimes() {
     r.git(&["tag", "v1.0"]);
     settle();
     let after = r.cache_key(0, &cfg);
-    // Tag creates a file in .git/refs/tags/ -- no monitored mtime changes
     assert_eq!(before, after);
 }
 
@@ -586,12 +516,8 @@ fn git_branch_create_does_not_change_current_mtimes() {
     r.git(&["branch", "unrelated"]);
     settle();
     let after = r.cache_key(0, &cfg);
-    // New branch creates a ref file, but current branch ref + HEAD + index unchanged
     assert_eq!(before, after);
 }
-
-// On Windows git status may rewrite .git/index even when nothing changed,
-// so we cannot assert index_mtime stays unchanged.
 
 #[test]
 fn git_log_is_read_only() {
@@ -626,7 +552,6 @@ fn git_merge_changes_index_branch_and_head() {
     r.write("feature.txt", "feature work");
     r.git(&["add", "feature.txt"]);
     r.git(&["commit", "-m", "feature work"]);
-    // Switch back to base branch and make another commit to force non-ff merge
     r.git(&["checkout", &base_branch]);
     r.write("mainline.txt", "mainline work");
     r.git(&["add", "mainline.txt"]);
@@ -679,19 +604,14 @@ fn git_pull_changes_remote_index_and_branch_mtime() {
     settle();
 
     let cfg = no_config();
-    let before = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None);
+    let before = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     settle();
 
     git(&wt_a, &["pull", "--no-edit"]);
     settle();
 
-    let after = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None);
-    // pull = fetch + merge: remote ref updated, index rewritten, branch ref moved
+    let after = prompt::compute_cache_key(&wt_a, 0, "vi", 120, 0, &cfg, None, 0);
     assert_changed(&before, &after, "remote_mtime");
     assert_changed(&before, &after, "index_mtime");
     assert_changed(&before, &after, "branch_mtime");
 }
-
-
-
-

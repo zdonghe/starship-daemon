@@ -12,12 +12,20 @@ starship = { version = "1", default-features = false }
 toml = "1"
 
 [dev-dependencies]
-gix = { version = "0.85", features = ["max-performance-safe", "status", "revision"] }
 tempfile = "3"
+gix = { version = "0.85", features = ["max-performance-safe", "status", "revision"] }
 
 [[bin]]
 name = "starship-daemon"
 path = "src/main.rs"
+
+[[bench]]
+name = "bench_hotpath"
+harness = false
+
+[[bench]]
+name = "bench_discovery"
+harness = false
 
 [patch.crates-io]
 starship = { git = "https://github.com/zdonghe/starship", branch = "main" }

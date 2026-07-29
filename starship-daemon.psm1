@@ -1,5 +1,3 @@
-# starship-daemon.psm1 — Import-Module, auto-start, clean unload on Remove-Module.
-
 $script:DaemonPath = $env:STARSHIP_DAEMON_PATH
 $script:LastStarshipConfig = $null
 

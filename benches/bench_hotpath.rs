@@ -31,7 +31,7 @@ fn main() {
     println!("(warm-up render done)\n");
 
     // ---------- cache hit: HashMap::get ----------
-    let key = prompt::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref());
+    let key = prompt::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0);
     let mut cache: HashMap<CacheKey, String> = HashMap::new();
     cache.insert(key.clone(), "dummy".into());
 
@@ -44,7 +44,7 @@ fn main() {
     // ---------- cache key computation ----------
     let n = 100;
     let start = Instant::now();
-    for _ in 0..n { let _ = prompt::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref()); }
+    for _ in 0..n { let _ = prompt::compute_cache_key(&cwd, 0, "viins", 120, 0, &config, gd.as_deref(), 0); }
     let key_us = start.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
     println!("  compute_cache_key (6+ stats):        {:>8.1} µs", key_us);
 

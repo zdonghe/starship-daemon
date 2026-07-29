@@ -1,58 +1,35 @@
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::mem;
 use std::path::PathBuf;
+use std::ffi::c_void;
+use starship_daemon::ffi::{self, HANDLE, DWORD, LPVOID, LPCVOID};
 use starship_daemon::prompt::{self, RenderContext};
+use starship_daemon::watcher::WatcherState;
 
-type HANDLE = *mut c_void;
-type DWORD = u32;
-type BOOL = i32;
-type LPCWSTR = *const u16;
-type LPVOID = *mut c_void;
-type LPCVOID = *const c_void;
-type LPDWORD = *mut u32;
-
-const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 const PIPE_ACCESS_DUPLEX: DWORD = 3;
 const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
 const PIPE_TYPE_MESSAGE: DWORD = 4;
 const PIPE_WAIT: DWORD = 0;
-const WAIT_OBJECT_0: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
 const CACHE_TTL_MINUTES: u64 = 2;
 const CACHE_MAX_ENTRIES: usize = 10000;
 
-#[repr(C)]
-struct OVERLAPPED {
-    internal: usize, internal_high: usize, offset: DWORD, offset_high: DWORD, h_event: HANDLE,
-}
+macro_rules! bail { ($p:expr) => { unsafe { ffi::DisconnectNamedPipe($p); return Err(()); } } }
 
-unsafe extern "system" {
-    fn CreateNamedPipeW(name: LPCWSTR, open_mode: DWORD, pipe_mode: DWORD, max_inst: DWORD, out_buf: DWORD, in_buf: DWORD, timeout: DWORD, sec: *const c_void) -> HANDLE;
-    fn ConnectNamedPipe(h: HANDLE, overlapped: *mut c_void) -> BOOL;
-    fn DisconnectNamedPipe(h: HANDLE) -> BOOL;
-    fn ReadFile(h: HANDLE, buf: LPVOID, len: DWORD, read: LPDWORD, overlapped: *mut c_void) -> BOOL;
-    fn WriteFile(h: HANDLE, buf: LPCVOID, len: DWORD, written: LPDWORD, overlapped: *mut c_void) -> BOOL;
-    fn CreateEventW(attr: *const c_void, manual: BOOL, init: BOOL, name: LPCWSTR) -> HANDLE;
-    fn WaitForMultipleObjects(count: DWORD, handles: *const HANDLE, wait_all: BOOL, ms: DWORD) -> DWORD;
-    fn ResetEvent(h: HANDLE) -> BOOL;
-    fn SetEvent(h: HANDLE) -> BOOL;
-    fn FlushFileBuffers(h: HANDLE) -> BOOL;
-    fn GetLastError() -> DWORD;
-}
-
-macro_rules! bail { ($p:expr) => { unsafe { DisconnectNamedPipe($p); return Err(()); } } }
-
-fn to_wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() }
 fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
-    // Named pipe in message-mode: ReadFile returns exactly one message when data available.
-    // read_exact is needed because the 3 client writes (cwd, props_len, props_data) arrive
-    // as separate messages. A single large ReadFile would block until the full amount arrives.
-    unsafe { let mut r: DWORD = 0; ReadFile(pipe, buf.as_mut_ptr() as LPVOID, buf.len() as DWORD, &mut r, std::ptr::null_mut()) != 0 && r == buf.len() as DWORD }
+    unsafe {
+        let mut avail: DWORD = 0;
+        if ffi::PeekNamedPipe(pipe, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, &mut avail) != 0 {
+            if avail > buf.len() as DWORD { return false; }
+        }
+        let mut r: DWORD = 0;
+        ffi::ReadFile(pipe, buf.as_mut_ptr() as LPVOID, buf.len() as DWORD, &mut r, std::ptr::null_mut()) != 0
+            && r == buf.len() as DWORD
+    }
 }
 
 fn write_all(pipe: HANDLE, buf: &[u8]) -> bool {
-    unsafe { let mut w: DWORD = 0; WriteFile(pipe, buf.as_ptr() as LPCVOID, buf.len() as DWORD, &mut w, std::ptr::null_mut()) != 0 }
+    unsafe { let mut w: DWORD = 0; ffi::WriteFile(pipe, buf.as_ptr() as LPCVOID, buf.len() as DWORD, &mut w, std::ptr::null_mut()) != 0 }
 }
 
 struct ClientProps {
@@ -114,11 +91,11 @@ fn main() {
     let mut prompt_cache: HashMap<prompt::CacheKey, String> = HashMap::new();
     let mut cached_config = prompt::read_config(&config_path);
     let mut last_cfg_mtime = prompt::get_mtime_ns(&config_path);
-    let wide = to_wide(starship_daemon::PIPE_NAME);
-    let pipe = unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, 1, 65536, 65536, 0, std::ptr::null()) };
-    if pipe == INVALID_HANDLE_VALUE { std::process::exit(0); }
-    let connect_event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-    let mut connect_ol: OVERLAPPED = unsafe { mem::zeroed() };
+    let wide = ffi::to_wide(starship_daemon::PIPE_NAME);
+    let pipe = unsafe { ffi::CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, 1, 65536, 65536, 0, std::ptr::null()) };
+    if pipe == ffi::INVALID_HANDLE_VALUE { std::process::exit(0); }
+    let connect_event = unsafe { ffi::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+    let mut connect_ol: ffi::OVERLAPPED = unsafe { mem::zeroed() };
 
     rearm_connect(pipe, &mut connect_ol, connect_event);
     println!("starship-daemon started on {}", starship_daemon::PIPE_NAME);
@@ -133,12 +110,24 @@ fn main() {
         let _ = prompt::render_prompt_with_config(&warm_ctx, None, &cached_config);
     }
 
+    let mut watcher = WatcherState::new();
+
     loop {
-        let handles = [connect_event];
-        let rc = unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, 0xFFFFFFFF) };
-        if (rc - WAIT_OBJECT_0) == 0 {
-            let _ = handle_client(pipe, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut prompt_cache);
-            rearm_connect(pipe, &mut connect_ol, connect_event);
+        let mut handles: Vec<HANDLE> = vec![connect_event];
+        for w in &watcher.entries { handles.push(w.change_event); }
+        let timeout: DWORD = if watcher.entries.is_empty() { u32::MAX } else { 100 };
+        let total = handles.len() as DWORD;
+        let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, timeout) };
+        if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
+            let idx = rc - ffi::WAIT_OBJECT_0;
+            if idx == 0 {
+                let _ = handle_client(pipe, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut prompt_cache, &mut watcher);
+                rearm_connect(pipe, &mut connect_ol, connect_event);
+            } else {
+                watcher.handle_event((idx - 1) as usize);
+            }
+        } else if rc == ffi::WAIT_TIMEOUT {
+            watcher.process_dirty();
         }
     }
 }
@@ -152,23 +141,22 @@ fn evict_stale(cache: &mut HashMap<prompt::CacheKey, String>) {
     cache.retain(|k, _| k.time_bucket > cutoff);
 }
 
-fn rearm_connect(pipe: HANDLE, ol: &mut OVERLAPPED, event: HANDLE) {
-    unsafe { *ol = mem::zeroed(); ol.h_event = event; ResetEvent(event); }
-    let ret = unsafe { ConnectNamedPipe(pipe, ol as *mut _ as *mut c_void) };
-    if ret == 0 { let err = unsafe { GetLastError() }; if err == ERROR_PIPE_CONNECTED { unsafe { SetEvent(event); } } }
-    else { unsafe { SetEvent(event); } }
+fn rearm_connect(pipe: HANDLE, ol: &mut ffi::OVERLAPPED, event: HANDLE) {
+    unsafe { *ol = mem::zeroed(); ol.h_event = event; ffi::ResetEvent(event); }
+    let ret = unsafe { ffi::ConnectNamedPipe(pipe, ol as *mut _ as *mut c_void) };
+    if ret == 0 { let err = unsafe { ffi::GetLastError() }; if err == ERROR_PIPE_CONNECTED { unsafe { ffi::SetEvent(event); } } }
+    else { unsafe { ffi::SetEvent(event); } }
 }
 
 fn send_response(pipe: HANDLE, output: &str) {
-    let b = output.as_bytes(); let l = (b.len() as u32).to_le_bytes();
-    let mut buf = [0u8; 4 + 65536];
-    buf[..4].copy_from_slice(&l);
-    buf[4..4+b.len()].copy_from_slice(b);
-    write_all(pipe, &buf[..4+b.len()]);
-    unsafe { FlushFileBuffers(pipe); DisconnectNamedPipe(pipe); }
+    let b = output.as_bytes();
+    let len_bytes = (b.len() as u32).to_le_bytes();
+    write_all(pipe, &len_bytes);
+    write_all(pipe, b);
+    unsafe { ffi::FlushFileBuffers(pipe); ffi::DisconnectNamedPipe(pipe); }
 }
 
-fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, prompt_cache: &mut HashMap<prompt::CacheKey, String>) -> Result<(), ()> {
+fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, prompt_cache: &mut HashMap<prompt::CacheKey, String>, watcher: &mut WatcherState) -> Result<(), ()> {
     let mut buf = [0u8; 8 + 32768];
     if !read_exact(pipe, &mut buf[..4]) { bail!(pipe); }
     let cwd_len = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
@@ -217,7 +205,11 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     }
 
     let tb = current_minute();
-    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path, git_dir.as_deref());
+    let repo_root = git_dir.as_ref().and_then(|g| g.parent());
+    if let Some(r) = repo_root { watcher.ensure(r); }
+    watcher.poll();
+    let watcher_gen = repo_root.map(|r| watcher.generation(r)).unwrap_or(0);
+    let ck = prompt::compute_cache_key(&cwd, status_code, &keymap, tw, tb, config_path, git_dir.as_deref(), watcher_gen);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     if let Some(cached) = prompt_cache.get(&ck) {

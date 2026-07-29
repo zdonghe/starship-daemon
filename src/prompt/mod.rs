@@ -20,49 +20,16 @@ pub struct CacheKey {
     pub branch_mtime: u64,
     pub remote_mtime: u64,
     pub config_mtime: u64,
+    pub watcher_gen: u64,
 }
 
 pub fn get_mtime_ns(p: &std::path::Path) -> u64 {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        type DWORD = u32;
-        type BOOL = i32;
-        type LPCWSTR = *const u16;
-        #[repr(C)]
-        #[allow(non_snake_case)]
-        struct FILETIME { dwLowDateTime: DWORD, dwHighDateTime: DWORD }
-        #[repr(C)]
-        #[allow(non_snake_case)]
-        struct WIN32_FILE_ATTRIBUTE_DATA {
-            dwFileAttributes: DWORD,
-            ftCreationTime: FILETIME,
-            ftLastAccessTime: FILETIME,
-            ftLastWriteTime: FILETIME,
-            nFileSizeHigh: DWORD,
-            nFileSizeLow: DWORD,
-        }
-        unsafe extern "system" {
-            fn GetFileAttributesExW(lpFileName: LPCWSTR, fInfoLevelId: DWORD, lpFileInformation: *mut std::ffi::c_void) -> BOOL;
-        }
-        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0u16)).collect();
-        let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { std::mem::zeroed() };
-        if unsafe { GetFileAttributesExW(wide.as_ptr(), 1, &mut data as *mut _ as *mut std::ffi::c_void) } == 0 {
-            return 0;
-        }
-        let intervals = ((data.ftLastWriteTime.dwHighDateTime as u64) << 32) | (data.ftLastWriteTime.dwLowDateTime as u64);
-        const EPOCH_DIFF: u64 = 116444736000000000;
-        intervals.saturating_sub(EPOCH_DIFF) * 100
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-    }
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 fn get_branch_ref_mtimes(git_dir: &std::path::Path) -> (u64, u64) {
@@ -79,7 +46,7 @@ fn get_branch_ref_mtimes(git_dir: &std::path::Path) -> (u64, u64) {
     (branch_mtime, remote_mtime)
 }
 
-pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path, git_dir: Option<&Path>) -> CacheKey {
+pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, time_bucket: u64, config_path: &Path, git_dir: Option<&Path>, watcher_gen: u64) -> CacheKey {
     let git_dir: Option<PathBuf> = git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(cwd));
     let (br_mtime, rr_mtime) = git_dir.as_ref().map(|d| get_branch_ref_mtimes(d)).unwrap_or((0, 0));
     CacheKey {
@@ -88,6 +55,7 @@ pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_wi
         index_mtime: git_dir.as_ref().map(|d| get_mtime_ns(&d.join("index"))).unwrap_or(0),
         branch_mtime: br_mtime, remote_mtime: rr_mtime,
         config_mtime: get_mtime_ns(config_path),
+        watcher_gen,
     }
 }
 
@@ -235,22 +203,4 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
         let _ = std::fs::remove_dir_all(dir);
     }
     result.trim_end_matches('\n').to_string()
-}
-
-pub mod test_helpers {
-    use super::*;
-
-    pub fn repocache_is_empty() -> bool {
-        REPO_CACHE.lock().unwrap().is_none()
-    }
-
-    pub fn repocache_clear() {
-        *REPO_CACHE.lock().unwrap() = None;
-    }
-
-    /// Returns (git_dir, index_mtime) if cache populated.
-    pub fn repocache_state() -> Option<(PathBuf, u64)> {
-        let cache = REPO_CACHE.lock().unwrap();
-        cache.as_ref().map(|c| (c.git_dir.clone(), c.index_mtime))
-    }
 }

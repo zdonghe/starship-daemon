@@ -23,7 +23,7 @@ fn ensure_creates_watcher_entry() {
 
     let mut w = WatcherState::new();
     w.ensure(&p);
-    assert_eq!(w.entries.len(), 1);
+    assert_eq!(w.num_entries(), 1);
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn ensure_is_idempotent() {
     let mut w = WatcherState::new();
     w.ensure(&p);
     w.ensure(&p);
-    assert_eq!(w.entries.len(), 1);
+    assert_eq!(w.num_entries(), 1);
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn cancel_io_is_needed_readdirectorychangesw_pending_at_drop() {
     // change_event is a manual-reset event, initially unsignaled.
     // Since no change has occurred yet, the IO completion hasn't fired.
     // Overlapped IO is pending — CancelIoEx is required before CloseHandle.
-    let rc = unsafe { ffi::WaitForSingleObject(w.entries[0].change_event, 0) };
+    let rc = unsafe { ffi::WaitForSingleObject(w.change_event(0), 0) };
 
     assert_eq!(rc, ffi::WAIT_TIMEOUT,
         "ReadDirectoryChangesW unexpectedly completed immediately (rc={rc}). \

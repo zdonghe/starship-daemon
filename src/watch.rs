@@ -57,7 +57,7 @@ pub struct WatchEntry {
     repo_root: PathBuf,
     dir_handle: HANDLE,
     change_buf: Vec<u8>,
-    pub change_event: HANDLE,
+    pub(crate) change_event: HANDLE,
     overlapped: ffi::OVERLAPPED,
     ignore: Option<GitignoreFilter>,
     pending: bool,
@@ -79,7 +79,7 @@ impl Drop for WatchEntry {
 }
 
 pub struct WatcherState {
-    pub entries: Vec<WatchEntry>,
+    pub(crate) entries: Vec<WatchEntry>,
     repo_versions: HashMap<PathBuf, u64>,
 }
 
@@ -121,8 +121,8 @@ impl WatcherState {
             pending: false,
         });
         let idx = self.entries.len() - 1;
-        let worked = start_watch(&mut self.entries[idx]);
-        self.repo_versions.insert(repo_root.to_path_buf(), if worked { 0 } else { 1 });
+        let _ = start_watch(&mut self.entries[idx]);
+        self.repo_versions.insert(repo_root.to_path_buf(), 0);
     }
 
     pub fn handle_event(&mut self, idx: usize) {
@@ -177,6 +177,25 @@ impl WatcherState {
         self.flush();
     }
 
+    pub fn process_signaled(&mut self) {
+        for i in 0..self.entries.len() {
+            if unsafe { ffi::WaitForSingleObject(self.entries[i].change_event, 0) } == ffi::WAIT_OBJECT_0 {
+                self.handle_event(i);
+            }
+        }
+    }
+
+    pub fn change_events(&self) -> impl Iterator<Item = HANDLE> + '_ {
+        self.entries.iter().map(|e| e.change_event)
+    }
+
+    pub fn num_entries(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn change_event(&self, idx: usize) -> HANDLE {
+        self.entries[idx].change_event
+    }
 }
 
 fn start_watch(rw: &mut WatchEntry) -> bool {

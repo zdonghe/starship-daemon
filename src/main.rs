@@ -66,20 +66,18 @@ fn main() {
     }
 
     let mut watcher = WatcherState::new();
-    let mut handles = Vec::with_capacity(watcher.entries.len() + 1);
+    let mut handles = Vec::new();
 
     loop {
         handles.push(connect_event);
-        for w in &watcher.entries { handles.push(w.change_event); }
+        handles.extend(watcher.change_events());
         let total = handles.len() as DWORD;
         let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, u32::MAX) };
         if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
-            let idx = rc - ffi::WAIT_OBJECT_0;
-            if idx == 0 {
+            watcher.process_signaled();
+            if rc == ffi::WAIT_OBJECT_0 {
                 let _ = handle_client(pipe, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
                 rearm_connect(pipe, &mut connect_ol, connect_event);
-            } else {
-                watcher.handle_event((idx - 1) as usize);
             }
         }
         handles.clear();
@@ -168,7 +166,7 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
     let v = if let Some(r) = repo_root {
         watcher.ensure(r);
-        watcher.poll();
+        watcher.flush();
         watcher.version(r)
     } else {
         0

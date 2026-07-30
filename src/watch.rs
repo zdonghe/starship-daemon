@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::ffi::{self, HANDLE, DWORD, LPVOID};
+use crate::gitignore::{GitignoreFilter, load_gitignore, is_ignored_str};
 
 const FILE_LIST_DIRECTORY: DWORD = 1;
 const FILE_SHARE_READ: DWORD = 1;
@@ -61,6 +62,7 @@ pub struct WatchEntry {
     dirty: bool,
     dirty_cooldown: Instant,
     generation: u64,
+    ignore: Option<GitignoreFilter>,
 }
 
 impl Drop for WatchEntry {
@@ -94,9 +96,11 @@ impl WatcherState {
 
     pub fn ensure(&mut self, repo_root: &Path) {
         if self.generations.contains_key(repo_root) { return; }
+        let dir_handle;
+        let change_event;
         unsafe {
             let wide = ffi::to_wide_path(repo_root);
-            let dir_handle = ffi::CreateFileW(wide.as_ptr(), FILE_LIST_DIRECTORY,
+            dir_handle = ffi::CreateFileW(wide.as_ptr(), FILE_LIST_DIRECTORY,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 std::ptr::null(), OPEN_EXISTING,
                 FILE_FLAG_OVERLAPPED | FILE_FLAG_BACKUP_SEMANTICS,
@@ -105,26 +109,28 @@ impl WatcherState {
                 self.generations.insert(repo_root.to_path_buf(), 0);
                 return;
             }
-            let change_event = ffi::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
+            change_event = ffi::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
             if change_event.is_null() {
                 ffi::CloseHandle(dir_handle);
                 self.generations.insert(repo_root.to_path_buf(), 0);
                 return;
             }
-            let mut entry = WatchEntry {
-                repo_root: repo_root.to_path_buf(),
-                dir_handle,
-                change_buf: vec![0u8; CHANGE_BUF_SIZE as usize],
-                change_event,
-                overlapped: mem::zeroed(),
-                dirty: false,
-                generation: 1,
-                dirty_cooldown: Instant::now(),
-            };
-            start_watch(&mut entry);
-            self.generations.insert(entry.repo_root.clone(), 1);
-            self.entries.push(entry);
         }
+        let ignore = load_gitignore(repo_root);
+        self.entries.push(WatchEntry {
+            repo_root: repo_root.to_path_buf(),
+            dir_handle,
+            change_buf: vec![0u8; CHANGE_BUF_SIZE as usize],
+            change_event,
+            overlapped: unsafe { mem::zeroed() },
+            dirty: false,
+            generation: 1,
+            dirty_cooldown: Instant::now(),
+            ignore,
+        });
+        let idx = self.entries.len() - 1;
+        start_watch(&mut self.entries[idx]);
+        self.generations.insert(repo_root.to_path_buf(), 1);
     }
 
     pub fn handle_event(&mut self, idx: usize) {
@@ -142,6 +148,9 @@ impl WatcherState {
                     let paths = extract_watcher_paths(&rw.change_buf[..len]);
                     for (path, _action) in paths {
                         if is_git_internal(&path) { continue; }
+                        if let Some(ref ig) = rw.ignore {
+                            if is_ignored_str(ig, &path) { continue; }
+                        }
                         rw.dirty = true;
                         rw.dirty_cooldown = Instant::now();
                     }
@@ -425,6 +434,7 @@ mod tests {
             dirty: true,
             dirty_cooldown: Instant::now(),
             generation: 5,
+            ignore: None,
         });
         w.generations.insert(PathBuf::from("/test"), 5);
 
@@ -446,6 +456,7 @@ mod tests {
             dirty: true,
             dirty_cooldown: Instant::now() - Duration::from_millis(200),
             generation: 1,
+            ignore: None,
         });
         w.entries.push(WatchEntry {
             repo_root: PathBuf::from("/b"),
@@ -456,6 +467,7 @@ mod tests {
             dirty: false,
             dirty_cooldown: Instant::now(),
             generation: 10,
+            ignore: None,
         });
         w.generations.insert(PathBuf::from("/a"), 1);
         w.generations.insert(PathBuf::from("/b"), 10);
@@ -502,7 +514,6 @@ mod tests {
 
     #[test]
     fn extract_zero_length_name_breaks() {
-        // Empty name shouldn't produce a path entry (name_len < 2)
         let mut buf = Vec::new();
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(&1u32.to_le_bytes());

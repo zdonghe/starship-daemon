@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::watch::WatcherState;
 
 mod common;
-use common::{no_config, TestRepo};
+use common::TestRepo;
 
 struct MultiRepoHarness {
     a: TestRepo,
@@ -15,7 +16,6 @@ struct MultiRepoHarness {
     watcher: WatcherState,
     lru: LruCache<CacheKey, CachedValue>,
     config: toml::Table,
-    config_path: std::path::PathBuf,
 }
 
 impl MultiRepoHarness {
@@ -23,14 +23,13 @@ impl MultiRepoHarness {
         let a = TestRepo::new();
         let b = TestRepo::new();
         let config = toml::Table::new();
-        let config_path = no_config();
         let mut watcher = WatcherState::new();
         watcher.ensure(a.path());
         watcher.ensure(b.path());
         let mut h = MultiRepoHarness {
             a, b, watcher,
             lru: LruCache::new(NonZeroUsize::new(256).unwrap()),
-            config, config_path,
+            config,
         };
         h.settle_and_poll();
         h
@@ -45,37 +44,24 @@ impl MultiRepoHarness {
         }
     }
 
-    fn render_a(&mut self) -> String {
-        let gd = starship_daemon::find_git_dir(self.a.path());
-        let gen_val = self.watcher.generation(self.a.path());
+    fn render_repo(&mut self, repo_path: &Path) -> String {
+        let gd = starship_daemon::find_git_dir(repo_path);
+        let gen_val = self.watcher.generation(repo_path);
         let key = cache::compute_cache_key(
-            self.a.path(), 0, "vi", 120,
-            self.config_path.as_path(),
+            repo_path, 0, "vi", 120,
+            0,
             gen_val,
         );
         let ctx = RenderContext {
-            cwd: self.a.path().to_path_buf(),
+            cwd: repo_path.to_path_buf(),
             terminal_width: 120, status_code: 0,
             keymap: "vi".to_string(),
         };
         cache::render_cached(&ctx, gd.as_deref(), &self.config, &key, &mut self.lru)
     }
 
-    fn render_b(&mut self) -> String {
-        let gd = starship_daemon::find_git_dir(self.b.path());
-        let gen_val = self.watcher.generation(self.b.path());
-        let key = cache::compute_cache_key(
-            self.b.path(), 0, "vi", 120,
-            self.config_path.as_path(),
-            gen_val,
-        );
-        let ctx = RenderContext {
-            cwd: self.b.path().to_path_buf(),
-            terminal_width: 120, status_code: 0,
-            keymap: "vi".to_string(),
-        };
-        cache::render_cached(&ctx, gd.as_deref(), &self.config, &key, &mut self.lru)
-    }
+    fn render_a(&mut self) -> String { let p = self.a.path().to_path_buf(); self.render_repo(&p) }
+    fn render_b(&mut self) -> String { let p = self.b.path().to_path_buf(); self.render_repo(&p) }
 
     fn gen_a(&self) -> u64 { self.watcher.generation(self.a.path()) }
     fn gen_b(&self) -> u64 { self.watcher.generation(self.b.path()) }
@@ -83,7 +69,6 @@ impl MultiRepoHarness {
     fn write_b(&self, name: &str, content: &str) { self.b.write(name, content); }
     fn remove_a(&self, name: &str) { self.a.remove(name); }
     fn git_a(&self, args: &[&str]) { self.a.git(args); }
-    fn git_b(&self, args: &[&str]) { self.b.git(args); }
 }
 
 // ============================================================

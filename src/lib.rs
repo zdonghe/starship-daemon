@@ -7,6 +7,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\starship-daemon";
 pub mod cache;
 pub mod ffi;
 pub mod watch;
+pub mod gitignore;
 
 fn find_git_dir_uncached(cwd: &Path) -> Option<PathBuf> {
     for d in cwd.ancestors() {
@@ -32,15 +33,15 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
     use std::sync::LazyLock;
     static CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
-    let key = if cwd.as_os_str().is_empty() { PathBuf::from(".") } else { cwd.to_path_buf() };
     let mut cache = CACHE.lock().unwrap();
-    if let Some(result) = cache.get(&key) {
+    if let Some(result) = cache.get(cwd) {
         return result.clone();
     }
-    let result = find_git_dir_uncached(&key);
+    let actual = if cwd.as_os_str().is_empty() { Path::new(".") } else { cwd };
+    let result = find_git_dir_uncached(actual);
     if cache.len() >= 64 {
         cache.clear();
     }
-    cache.insert(key, result.clone());
+    cache.insert(actual.to_path_buf(), result.clone());
     result
 }

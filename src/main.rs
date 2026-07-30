@@ -108,15 +108,16 @@ fn main() {
             keymap: "vi".to_string(),
         };
         let warm_key = cache::compute_cache_key(
-            Path::new("."), 0, "vi", 120, &config_path, 0,
+            Path::new("."), 0, "vi", 120, 0, 0,
         );
         let _ = cache::render_cached(&warm_ctx, None, &cached_config, &warm_key, &mut lru);
     }
 
     let mut watcher = WatcherState::new();
+    let mut handles = Vec::with_capacity(watcher.entries.len() + 1);
 
     loop {
-        let mut handles: Vec<HANDLE> = vec![connect_event];
+        handles.push(connect_event);
         for w in &watcher.entries { handles.push(w.change_event); }
         let timeout: DWORD = if watcher.entries.is_empty() { u32::MAX } else { 100 };
         let total = handles.len() as DWORD;
@@ -132,14 +133,20 @@ fn main() {
         } else if rc == ffi::WAIT_TIMEOUT {
             watcher.process_dirty();
         }
+        handles.clear();
     }
 }
 
 fn rearm_connect(pipe: HANDLE, ol: &mut ffi::OVERLAPPED, event: HANDLE) {
-    unsafe { *ol = mem::zeroed(); ol.h_event = event; ffi::ResetEvent(event); }
-    let ret = unsafe { ffi::ConnectNamedPipe(pipe, ol as *mut _ as *mut c_void) };
-    if ret == 0 { let err = unsafe { ffi::GetLastError() }; if err == ERROR_PIPE_CONNECTED { unsafe { ffi::SetEvent(event); } } }
-    else { unsafe { ffi::SetEvent(event); } }
+    unsafe {
+        *ol = mem::zeroed();
+        ol.h_event = event;
+        ffi::ResetEvent(event);
+        let ret = ffi::ConnectNamedPipe(pipe, ol as *mut _ as *mut c_void);
+        if ret != 0 || ffi::GetLastError() == ERROR_PIPE_CONNECTED {
+            ffi::SetEvent(event);
+        }
+    }
 }
 
 fn send_response(pipe: HANDLE, output: &str) {
@@ -169,6 +176,7 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
 
+    let mut cfg_changed = false;
     if let Some(ref req) = props.starship_config {
         let p = PathBuf::from(req);
         if p != *config_path {
@@ -179,17 +187,23 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
                 unsafe { std::env::set_var("STARSHIP_CONFIG", req); }
                 *cached_config = cache::read_config(config_path);
                 *last_cfg_mtime = cache::get_mtime_ns(config_path);
+                cfg_changed = true;
             }
         }
     }
 
-    let cur_cfg_mtime = cache::get_mtime_ns(config_path);
-    if cur_cfg_mtime != *last_cfg_mtime {
-        *last_cfg_mtime = cur_cfg_mtime;
-        *cached_config = cache::read_config(config_path);
-        lru.clear();
-        cache::clear_repo_cache();
-    }
+    let cur_cfg_mtime = if !cfg_changed {
+        let mtime = cache::get_mtime_ns(config_path);
+        if mtime != *last_cfg_mtime {
+            *last_cfg_mtime = mtime;
+            *cached_config = cache::read_config(config_path);
+            lru.clear();
+            cache::clear_repo_cache();
+        }
+        mtime
+    } else {
+        *last_cfg_mtime
+    };
 
     let tw = props.terminal_width.unwrap_or(120);
 
@@ -204,8 +218,8 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     if let Some(r) = repo_root { watcher.ensure(r); }
     watcher.poll();
     watcher.process_dirty();
-    let watcher_gen = repo_root.map(|r| watcher.generation(r)).unwrap_or(0);
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, config_path.as_path(), watcher_gen);
+    let watcher_gen = repo_root.map_or(0, |r| watcher.generation(r));
+    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, watcher_gen);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);

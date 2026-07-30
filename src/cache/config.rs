@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub fn load_config(path: &Path) -> Option<PathBuf> {
-    if path.is_file() { Some(path.to_path_buf()) } else { None }
+    path.is_file().then(|| path.to_path_buf())
 }
 
 pub fn default_config_path() -> PathBuf {

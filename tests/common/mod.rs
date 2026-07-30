@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -56,10 +56,6 @@ impl TestRepo {
         std::fs::remove_file(self.path().join(name)).unwrap();
     }
 
-}
-
-pub fn no_config() -> PathBuf {
-    PathBuf::from("__nonexistent_config__")
 }
 
 pub fn current_branch(repo: &Path) -> String {

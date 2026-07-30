@@ -31,15 +31,12 @@ struct RepoCache {
 }
 
 static REPO_CACHE: Mutex<Option<RepoCache>> = Mutex::new(None);
+static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn get_or_create_ctx(
     git_dir: Option<&Path>,
     current_dir: &Path,
     logical_dir: &Path,
-    status_code: i32,
-    keymap: &str,
-    terminal_width: usize,
-    config: &toml::Table,
 ) -> starship::context::Context<'static> {
     if let Some(gd) = git_dir {
         let index_mtime = get_mtime_ns(&gd.join("index"));
@@ -52,16 +49,12 @@ fn get_or_create_ctx(
             }
         }
     }
-    let mut properties = starship::context::Properties::default();
-    properties.status_code = Some(status_code.to_string());
-    properties.keymap = keymap.to_string();
+    let properties = starship::context::Properties::default();
     let env = starship::context::Env::default();
-    let mut sctx = starship::context::Context::new_with_shell_and_path(
+    let sctx = starship::context::Context::new_with_shell_and_path(
         properties, starship::context::Shell::Pwsh, starship::context::Target::Main,
         current_dir.to_path_buf(), logical_dir.to_path_buf(), env,
     );
-    sctx.width = terminal_width;
-    sctx = sctx.set_config(config.clone());
     sctx
 }
 
@@ -69,14 +62,17 @@ pub fn clear_repo_cache() {
     *REPO_CACHE.lock().unwrap() = None;
 }
 
-pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
-    static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
+fn make_bust_dir(git_dir: &Path) -> (PathBuf, PathBuf) {
+    let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::create_dir_all(&bust);
+    (bust.clone(), bust)
+}
 
+pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
     let (current_dir, bust_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
-        Some(git_dir) => {
-            let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
-            let _ = std::fs::create_dir_all(&bust);
-            (bust.clone(), Some(bust))
+        Some(ref gd) => {
+            let (c, b) = make_bust_dir(gd);
+            (c, Some(b))
         }
         None => (ctx.cwd.clone(), None),
     };
@@ -100,44 +96,18 @@ pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
 }
 
 pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
-    static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
     let (current_dir, bust_dir, resolved_git_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
-        Some(git_dir) => {
-            let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
-            let _ = std::fs::create_dir_all(&bust);
-            (bust.clone(), Some(bust), Some(git_dir))
+        Some(ref gd) => {
+            let (c, b) = make_bust_dir(gd);
+            (c, Some(b), Some(gd.clone()))
         }
         None => (ctx.cwd.clone(), None, None),
     };
 
-    let mut sctx = get_or_create_ctx(
-        resolved_git_dir.as_deref(),
-        &current_dir,
-        &ctx.cwd,
-        ctx.status_code,
-        &ctx.keymap,
-        ctx.terminal_width,
-        config,
-    );
-
-    sctx.current_dir = current_dir.clone();
-    sctx.logical_dir = ctx.cwd.clone();
-    sctx.width = ctx.terminal_width;
-    sctx.properties.status_code = Some(ctx.status_code.to_string());
-    sctx.properties.keymap = ctx.keymap.clone();
-    sctx = sctx.set_config(config.clone());
-
+    let sctx = prepare_ctx(resolved_git_dir.as_deref(), &current_dir, ctx, config);
     let result = starship::print::get_prompt(&sctx);
-
     if let Some(ref gd) = resolved_git_dir {
-        let index_mtime = get_mtime_ns(&gd.join("index"));
-        let mut cache = REPO_CACHE.lock().unwrap();
-        *cache = Some(RepoCache {
-            git_dir: gd.clone(),
-            index_mtime,
-            ctx: Some(sctx),
-        });
+        save_repo_cache(gd, sctx);
     }
 
     if let Some(dir) = bust_dir {
@@ -149,28 +119,26 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
 fn expand_all(context: &starship::context::Context) -> String {
     let format_str = &context.root_config.format;
 
-    if !format_str.contains("$all") && !format_str.contains("${all}") {
+    if !format_str.contains("$all") {
         return format_str.clone();
     }
 
     let right_str = &context.root_config.right_format;
     let left_vars = StringFormatter::new(format_str).ok()
-        .map(|f| f.get_variables()).unwrap_or_default();
+        .map_or(BTreeSet::new(), |f| f.get_variables());
     let right_vars = StringFormatter::new(right_str).ok()
-        .map(|f| f.get_variables()).unwrap_or_default();
+        .map_or(BTreeSet::new(), |f| f.get_variables());
 
-    let explicit: BTreeSet<_> = left_vars.union(&right_vars).cloned().collect();
+    let explicit: BTreeSet<&str> = left_vars.union(&right_vars).map(|s| s.as_str()).collect();
 
-    let expanded: Vec<&str> = PROMPT_ORDER.iter()
-        .filter(|m| !explicit.iter().any(|e| e == *m))
-        .filter(|m| !context.is_module_disabled_in_config(m))
-        .copied()
+    let expanded: Vec<&str> = PROMPT_ORDER.iter().copied()
+        .filter(|m| !explicit.contains(m) && !context.is_module_disabled_in_config(m))
         .collect();
 
     let replacement = if expanded.is_empty() {
         String::new()
     } else {
-        expanded.iter().map(|m| format!("${}", m)).collect::<Vec<_>>().join("")
+        expanded.iter().map(|m| format!("${}", m)).collect::<String>()
     };
 
     format_str.replace("${all}", &replacement).replace("$all", &replacement)
@@ -187,19 +155,44 @@ fn populate_cache(
     };
 
     for module in formatter.get_variables() {
-        if module == "all" || module == "time" {
-            continue;
-        }
-        if context.is_module_disabled_in_config(&module) {
-            continue;
-        }
-        if cache.contains_key(&module) {
+        if module == "all" || module == "time" || context.is_module_disabled_in_config(&module) || cache.contains_key(&module) {
             continue;
         }
         if let Some(segments) = starship::print::get_module_segments(&module, context) {
             cache.insert(module, segments);
         }
     }
+}
+
+fn prepare_ctx(
+    git_dir: Option<&Path>,
+    current_dir: &Path,
+    ctx: &RenderContext,
+    config: &toml::Table,
+) -> starship::context::Context<'static> {
+    let mut sctx = get_or_create_ctx(
+        git_dir, current_dir, &ctx.cwd,
+    );
+    sctx.current_dir = current_dir.to_path_buf();
+    sctx.logical_dir = ctx.cwd.clone();
+    sctx.width = ctx.terminal_width;
+    sctx.properties.status_code = Some(ctx.status_code.to_string());
+    sctx.properties.keymap = ctx.keymap.clone();
+    sctx.set_config(config.clone())
+}
+
+fn resolve_format(sctx: &starship::context::Context) -> String {
+    if sctx.root_config.format.contains('$') {
+        expand_all(sctx)
+    } else {
+        sctx.root_config.format.clone()
+    }
+}
+
+fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
+    let index_mtime = get_mtime_ns(&gd.join("index"));
+    let mut rc = REPO_CACHE.lock().unwrap();
+    *rc = Some(RepoCache { git_dir: gd.to_path_buf(), index_mtime, ctx: Some(sctx) });
 }
 
 pub fn render_cached(
@@ -213,95 +206,57 @@ pub fn render_cached(
     let resolved_gd = git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd));
 
     // Path 1: Full hit — time_bucket matches
-    if lru.peek(&full_key).is_some_and(|e| e.time_bucket == tb) {
-        return lru.get(&full_key).unwrap().rendered.clone();
+    if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb) {
+        return entry.rendered.clone();
     }
 
     // Path 2: Time-only re-render — key exists, stale time_bucket
     // No bust_dir, no populate_cache, just re-use cached segments
-    if lru.peek(&full_key).is_some() {
-        let (key, mut entry) = lru.pop_entry(&full_key).unwrap();
+    if let Some((key, mut entry)) = lru.pop_entry(&full_key) {
 
-        let mut sctx = get_or_create_ctx(
-            resolved_gd.as_deref(), &ctx.cwd, &ctx.cwd,
-            ctx.status_code, &ctx.keymap, ctx.terminal_width, config,
-        );
-        sctx.current_dir = ctx.cwd.clone();
-        sctx.logical_dir = ctx.cwd.clone();
-        sctx.width = ctx.terminal_width;
-        sctx.properties.status_code = Some(ctx.status_code.to_string());
-        sctx.properties.keymap = ctx.keymap.clone();
-        sctx = sctx.set_config(config.clone());
-
-        let fmt = if sctx.root_config.format.contains('$') {
-            expand_all(&sctx)
-        } else {
-            sctx.root_config.format.clone()
-        };
-
+        let sctx = prepare_ctx(resolved_gd.as_deref(), &ctx.cwd, ctx, config);
+        let fmt = resolve_format(&sctx);
         let r = get_prompt_with_cache(&sctx, &entry.segments, &fmt);
-        let trimmed = r.trim_end_matches('\n').to_string();
-        entry.rendered = trimmed.clone();
+        let rendered = r.trim_end_matches('\n').to_string();
+        entry.rendered = rendered.clone();
         entry.time_bucket = tb;
-        let rendered = entry.rendered.clone();
         lru.put(key, entry);
 
         if let Some(ref gd) = resolved_gd {
-            let index_mtime = get_mtime_ns(&gd.join("index"));
-            let mut rc = REPO_CACHE.lock().unwrap();
-            *rc = Some(RepoCache { git_dir: gd.clone(), index_mtime, ctx: Some(sctx) });
+            save_repo_cache(gd, sctx);
         }
 
         return rendered;
     }
 
     // Path 3: Full miss — bust_dir + populate_cache
-    static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let (current_dir, bust_dir) = match resolved_gd {
         Some(ref gd) => {
-            let bust = gd.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
-            let _ = std::fs::create_dir_all(&bust);
-            (bust.clone(), Some(bust))
+            let (c, b) = make_bust_dir(gd);
+            (c, Some(b))
         }
         None => (ctx.cwd.clone(), None),
     };
 
-    let mut sctx = get_or_create_ctx(
-        resolved_gd.as_deref(), &current_dir, &ctx.cwd,
-        ctx.status_code, &ctx.keymap, ctx.terminal_width, config,
-    );
-    sctx.current_dir = current_dir.clone();
-    sctx.logical_dir = ctx.cwd.clone();
-    sctx.width = ctx.terminal_width;
-    sctx.properties.status_code = Some(ctx.status_code.to_string());
-    sctx.properties.keymap = ctx.keymap.clone();
-    sctx = sctx.set_config(config.clone());
-
-    let fmt = if sctx.root_config.format.contains('$') {
-        expand_all(&sctx)
-    } else {
-        sctx.root_config.format.clone()
-    };
-
+    let sctx = prepare_ctx(resolved_gd.as_deref(), &current_dir, ctx, config);
+    let fmt = resolve_format(&sctx);
     let mut module_cache = ModuleCache::new();
     populate_cache(&sctx, &fmt, &mut module_cache);
-    let r = get_prompt_with_cache(&sctx, &module_cache, &fmt);
-    let trimmed = r.trim_end_matches('\n').to_string();
+    let rendered = get_prompt_with_cache(&sctx, &module_cache, &fmt);
+    let rendered = rendered.trim_end_matches('\n').to_string();
     lru.put(full_key.clone(), CachedValue {
-        rendered: trimmed.clone(),
+        rendered: rendered.clone(),
         segments: module_cache,
         time_bucket: tb,
     });
 
     if let Some(ref gd) = resolved_gd {
-        let index_mtime = get_mtime_ns(&gd.join("index"));
-        let mut rc = REPO_CACHE.lock().unwrap();
-        *rc = Some(RepoCache { git_dir: gd.clone(), index_mtime, ctx: Some(sctx) });
+        save_repo_cache(gd, sctx);
     }
 
     if let Some(dir) = bust_dir { let _ = std::fs::remove_dir_all(dir); }
-    trimmed
+    rendered
 }
 
 #[cfg(test)]
@@ -404,7 +359,7 @@ mod tests {
             [character]
             format = ">"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let expected = render_prompt_with_config(&ctx, None, &cfg);
@@ -439,7 +394,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let full = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -469,7 +424,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -514,7 +469,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _full = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -555,7 +510,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -601,7 +556,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -643,7 +598,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, Path::new("__nonexistent_config__"), 0);
+        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);

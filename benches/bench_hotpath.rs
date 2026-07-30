@@ -33,7 +33,7 @@ fn main() {
     println!("(warm-up render done)\n");
 
     // ---------- cache hit: LruCache::get ----------
-    let key = cache::compute_cache_key(&cwd, 0, "viins", 120, &config_path, 0);
+    let key = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, 0);
     let rendered = "dummy".to_string();
     let segments = starship::print::ModuleCache::new();
     let cached = CachedValue {
@@ -53,7 +53,7 @@ fn main() {
     // ---------- cache key computation ----------
     let n = 100;
     let start = Instant::now();
-    for _ in 0..n { let _ = cache::compute_cache_key(&cwd, 0, "viins", 120, &config, 0); }
+    for _ in 0..n { let _ = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, 0); }
     let key_us = start.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
     println!("  compute_cache_key (2 stats):         {:>8.1} us", key_us);
 

@@ -27,6 +27,10 @@ harness = false
 name = "bench_discovery"
 harness = false
 
+[[bench]]
+name = "bench_gitignore"
+harness = false
+
 [patch.crates-io]
 starship = { git = "https://github.com/zdonghe/starship", branch = "main" }
 

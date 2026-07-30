@@ -14,32 +14,25 @@ fn render_output_reflects_git_status_changes() {
     let r = TestRepo::new();
     let cfg = toml::Table::new();
 
-    let ctx = |cwd: &Path| cache::RenderContext {
-        cwd: cwd.to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
-
     let git_dir = starship_daemon::find_git_dir(r.path());
-    let out1 = cache::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out1 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
     assert!(!out1.is_empty(), "first render should produce output");
 
     r.write("untracked.txt", "new");
     settle();
-    let out2 = cache::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out2 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
     assert!(!out2.is_empty());
     assert_ne!(out1, out2, "render output should change after file create");
 
     r.git(&["add", "untracked.txt"]);
     settle();
-    let out3 = cache::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out3 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
     assert!(!out3.is_empty());
     assert_ne!(out2, out3, "render output should change after git add");
 
     r.git(&["commit", "-m", "add untracked.txt"]);
     settle();
-    let out4 = cache::render_prompt_with_config(&ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out4 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
     assert!(!out4.is_empty());
 }
 

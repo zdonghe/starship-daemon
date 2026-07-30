@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use crate::ffi::{self, HANDLE, DWORD, LPVOID};
 use crate::gitignore::{GitignoreFilter, load_gitignore, is_ignored_str};
@@ -17,12 +16,13 @@ const FILE_FLAG_BACKUP_SEMANTICS: DWORD = 0x02000000;
 const FILE_NOTIFY_CHANGE_FILE_NAME: DWORD = 1;
 const FILE_NOTIFY_CHANGE_DIR_NAME: DWORD = 2;
 const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
-const DIRTY_COOLDOWN_MS: u64 = 100;
 const CHANGE_BUF_SIZE: u32 = 65536;
 
 fn is_git_internal(path: &str) -> bool {
     let trimmed = path.trim_start_matches('/');
     if let Some(rest) = trimmed.strip_prefix(".git/") {
+        // FETCH_HEAD is intentionally excluded here. We rely on refs/remotes/*
+        // changes from fetch/pull instead (FETCH_HEAD alone is not sufficient).
         rest != "index" && rest != "HEAD" && !rest.starts_with("refs/heads/") && !rest.starts_with("refs/remotes/") && rest != "refs/stash" && rest != "packed-refs"
     } else {
         trimmed == ".git"
@@ -59,10 +59,8 @@ pub struct WatchEntry {
     change_buf: Vec<u8>,
     pub change_event: HANDLE,
     overlapped: ffi::OVERLAPPED,
-    dirty: bool,
-    dirty_cooldown: Instant,
-    generation: u64,
     ignore: Option<GitignoreFilter>,
+    pending: bool,
 }
 
 impl Drop for WatchEntry {
@@ -82,20 +80,20 @@ impl Drop for WatchEntry {
 
 pub struct WatcherState {
     pub entries: Vec<WatchEntry>,
-    generations: HashMap<PathBuf, u64>,
+    repo_versions: HashMap<PathBuf, u64>,
 }
 
 impl WatcherState {
     pub fn new() -> Self {
-        WatcherState { entries: Vec::new(), generations: HashMap::new() }
+        WatcherState { entries: Vec::new(), repo_versions: HashMap::new() }
     }
 
-    pub fn generation(&self, repo_root: &Path) -> u64 {
-        self.generations.get(repo_root).copied().unwrap_or(0)
+    pub fn version(&self, repo_root: &Path) -> u64 {
+        self.repo_versions.get(repo_root).copied().unwrap_or(0)
     }
 
     pub fn ensure(&mut self, repo_root: &Path) {
-        if self.generations.contains_key(repo_root) { return; }
+        if self.repo_versions.contains_key(repo_root) { return; }
         let dir_handle;
         let change_event;
         unsafe {
@@ -105,14 +103,10 @@ impl WatcherState {
                 std::ptr::null(), OPEN_EXISTING,
                 FILE_FLAG_OVERLAPPED | FILE_FLAG_BACKUP_SEMANTICS,
                 std::ptr::null_mut());
-            if dir_handle == ffi::INVALID_HANDLE_VALUE {
-                self.generations.insert(repo_root.to_path_buf(), 0);
-                return;
-            }
+            if dir_handle == ffi::INVALID_HANDLE_VALUE { return; }
             change_event = ffi::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
             if change_event.is_null() {
                 ffi::CloseHandle(dir_handle);
-                self.generations.insert(repo_root.to_path_buf(), 0);
                 return;
             }
         }
@@ -123,40 +117,53 @@ impl WatcherState {
             change_buf: vec![0u8; CHANGE_BUF_SIZE as usize],
             change_event,
             overlapped: unsafe { mem::zeroed() },
-            dirty: false,
-            generation: 1,
-            dirty_cooldown: Instant::now(),
             ignore,
+            pending: false,
         });
         let idx = self.entries.len() - 1;
-        start_watch(&mut self.entries[idx]);
-        self.generations.insert(repo_root.to_path_buf(), 1);
+        let worked = start_watch(&mut self.entries[idx]);
+        self.repo_versions.insert(repo_root.to_path_buf(), if worked { 0 } else { 1 });
     }
 
     pub fn handle_event(&mut self, idx: usize) {
         if idx >= self.entries.len() { return; }
-        let rw = &mut self.entries[idx];
-        unsafe {
+        let changed = {
+            let rw = &mut self.entries[idx];
             let mut bytes: DWORD = 0;
-            let ok = ffi::GetOverlappedResult(rw.dir_handle, &mut rw.overlapped as *mut _ as *mut c_void, &mut bytes, 1);
-            if ok != 0 {
+            let ok = unsafe {
+                ffi::GetOverlappedResult(rw.dir_handle, &mut rw.overlapped as *mut _ as *mut c_void, &mut bytes, 1)
+            };
+            let changed = if ok != 0 {
                 if bytes == 0 {
-                    rw.dirty = true;
-                    rw.dirty_cooldown = Instant::now();
+                    true
                 } else {
                     let len = (bytes as usize).min(rw.change_buf.len());
                     let paths = extract_watcher_paths(&rw.change_buf[..len]);
-                    for (path, _action) in paths {
-                        if is_git_internal(&path) { continue; }
+                    paths.iter().any(|(path, _)| {
+                        if is_git_internal(path) { return false; }
                         if let Some(ref ig) = rw.ignore {
-                            if is_ignored_str(ig, &path) { continue; }
+                            if is_ignored_str(ig, path) { return false; }
                         }
-                        rw.dirty = true;
-                        rw.dirty_cooldown = Instant::now();
-                    }
+                        true
+                    })
                 }
+            } else {
+                false
+            };
+            let start_ok = start_watch(rw);
+            changed || !start_ok
+        };
+        if changed {
+            self.entries[idx].pending = true;
+        }
+    }
+
+    pub fn flush(&mut self) {
+        for e in &mut self.entries {
+            if e.pending {
+                e.pending = false;
+                *self.repo_versions.entry(e.repo_root.clone()).or_insert(0) += 1;
             }
-            start_watch(rw);
         }
     }
 
@@ -167,33 +174,20 @@ impl WatcherState {
                 self.handle_event(i);
             }
         }
+        self.flush();
     }
 
-    pub fn process_dirty(&mut self) {
-        let now = Instant::now();
-        for rw in &mut self.entries {
-            if !rw.dirty { continue; }
-            if now.duration_since(rw.dirty_cooldown) < Duration::from_millis(DIRTY_COOLDOWN_MS) { continue; }
-            rw.generation += 1;
-            rw.dirty = false;
-            self.generations.insert(rw.repo_root.clone(), rw.generation);
-        }
-    }
 }
 
-fn start_watch(rw: &mut WatchEntry) {
+fn start_watch(rw: &mut WatchEntry) -> bool {
     unsafe {
         ffi::ResetEvent(rw.change_event);
         rw.overlapped = mem::zeroed();
         rw.overlapped.h_event = rw.change_event;
         let mut bytes: DWORD = 0;
-        let ok = ffi::ReadDirectoryChangesW(rw.dir_handle, rw.change_buf.as_mut_ptr() as LPVOID, CHANGE_BUF_SIZE, 1,
+        ffi::ReadDirectoryChangesW(rw.dir_handle, rw.change_buf.as_mut_ptr() as LPVOID, CHANGE_BUF_SIZE, 1,
             FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            &mut bytes, &mut rw.overlapped as *mut _ as *mut c_void, std::ptr::null());
-        if ok == 0 {
-            rw.dirty = true;
-            rw.dirty_cooldown = Instant::now();
-        }
+            &mut bytes, &mut rw.overlapped as *mut _ as *mut c_void, std::ptr::null()) != 0
     }
 }
 
@@ -362,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_inserts_generation_on_success() {
+    fn ensure_inserts_entry() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub");
         std::fs::create_dir_all(&p).unwrap();
@@ -372,8 +366,7 @@ mod tests {
 
         let mut w = WatcherState::new();
         w.ensure(&p);
-        assert!(w.generations.contains_key(&p));
-        assert_eq!(w.generation(&p), 1);
+        assert_eq!(w.entries.len(), 1);
     }
 
     #[test]
@@ -387,8 +380,9 @@ mod tests {
 
         let mut w = WatcherState::new();
         w.ensure(&p);
-        assert_eq!(w.entries.len(), 1, "watcher should have 1 entry");
-        assert_eq!(w.generation(&p), 1);
+        assert_eq!(w.entries.len(), 1);
+
+        let v0 = w.version(&p);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -400,81 +394,16 @@ mod tests {
         assert_eq!(rc, ffi::WAIT_OBJECT_0, "event should be signaled after file create");
 
         w.poll();
-        assert!(w.entries[0].dirty, "entry should be dirty after poll");
+        assert!(w.version(&p) > v0, "version should increase after file create");
 
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        w.process_dirty();
-        let g1 = w.generation(&p);
-        assert!(g1 > 1, "gen should have been bumped from event, got {g1}");
-        assert!(!w.entries[0].dirty, "entry should not be dirty after process_dirty");
+        let v1 = w.version(&p);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(p.join("another_file.txt"), b"world").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         w.poll();
-        assert!(w.entries[0].dirty, "entry should be dirty after second poll");
-
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        w.process_dirty();
-        let g2 = w.generation(&p);
-        assert!(g2 > g1, "gen should have been bumped from second event, got {g2} vs {g1}");
-        assert!(!w.entries[0].dirty, "entry should not be dirty after second process_dirty");
-    }
-
-    #[test]
-    fn process_dirty_respects_cooldown() {
-        let mut w = WatcherState::new();
-        w.entries.push(WatchEntry {
-            repo_root: PathBuf::from("/test"),
-            dir_handle: ffi::INVALID_HANDLE_VALUE,
-            change_buf: Vec::new(),
-            change_event: std::ptr::null_mut(),
-            overlapped: unsafe { std::mem::zeroed() },
-            dirty: true,
-            dirty_cooldown: Instant::now(),
-            generation: 5,
-            ignore: None,
-        });
-        w.generations.insert(PathBuf::from("/test"), 5);
-
-        // Cooldown hasn't elapsed yet - no bump
-        w.process_dirty();
-        assert_eq!(w.generation(Path::new("/test")), 5);
-        assert!(w.entries[0].dirty);
-    }
-
-    #[test]
-    fn process_dirty_skips_non_dirty() {
-        let mut w = WatcherState::new();
-        w.entries.push(WatchEntry {
-            repo_root: PathBuf::from("/a"),
-            dir_handle: ffi::INVALID_HANDLE_VALUE,
-            change_buf: Vec::new(),
-            change_event: std::ptr::null_mut(),
-            overlapped: unsafe { std::mem::zeroed() },
-            dirty: true,
-            dirty_cooldown: Instant::now() - Duration::from_millis(200),
-            generation: 1,
-            ignore: None,
-        });
-        w.entries.push(WatchEntry {
-            repo_root: PathBuf::from("/b"),
-            dir_handle: ffi::INVALID_HANDLE_VALUE,
-            change_buf: Vec::new(),
-            change_event: std::ptr::null_mut(),
-            overlapped: unsafe { std::mem::zeroed() },
-            dirty: false,
-            dirty_cooldown: Instant::now(),
-            generation: 10,
-            ignore: None,
-        });
-        w.generations.insert(PathBuf::from("/a"), 1);
-        w.generations.insert(PathBuf::from("/b"), 10);
-
-        w.process_dirty();
-        assert_eq!(w.generation(Path::new("/a")), 2, "dirty entry should bump");
-        assert_eq!(w.generation(Path::new("/b")), 10, "non-dirty entry should not bump");
+        assert!(w.version(&p) > v1, "version should increase after second file create");
     }
 
     #[test]
@@ -520,5 +449,55 @@ mod tests {
         buf.extend_from_slice(&0u32.to_le_bytes());
         let paths = extract_watcher_paths(&buf);
         assert_eq!(paths.len(), 0);
+    }
+
+    #[test]
+    fn burst_coalesces_real_fs_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub");
+        std::fs::create_dir_all(&p).unwrap();
+        let out = std::process::Command::new("git")
+            .args(["init"]).current_dir(&p).output();
+        if out.map_or(true, |o| !o.status.success()) { return; }
+
+        let mut w = WatcherState::new();
+        w.ensure(&p);
+        let v0 = w.version(&p);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(p.join("a.txt"), b"1").unwrap();
+        std::fs::write(p.join("b.txt"), b"2").unwrap();
+        std::fs::write(p.join("c.txt"), b"3").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        w.poll();
+        let bumps = w.version(&p) - v0;
+        assert!(bumps >= 1, "version must increase after burst");
+        assert_eq!(bumps, 1, "burst must produce exactly 1 version bump, got {bumps}");
+    }
+
+    #[test]
+    fn burst_events_coalesce_to_single_version_bump() {
+        let p = Path::new("C:\\dummy");
+        let mut w = WatcherState::new();
+        w.repo_versions.insert(p.to_path_buf(), 0);
+        unsafe {
+            let ev = ffi::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
+            assert!(!ev.is_null());
+            w.entries.push(WatchEntry {
+                repo_root: p.to_path_buf(),
+                dir_handle: ffi::INVALID_HANDLE_VALUE,
+                change_buf: vec![],
+                change_event: ev,
+                overlapped: mem::zeroed(),
+                ignore: None,
+                pending: true,
+            });
+        }
+        assert_eq!(w.version(p), 0);
+        w.poll();
+        assert_eq!(w.version(p), 1, "burst events coalesce to single version bump");
+        w.poll();
+        assert_eq!(w.version(p), 1, "second poll must not bump again");
     }
 }

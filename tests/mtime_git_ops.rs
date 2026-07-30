@@ -7,26 +7,21 @@ use starship_daemon::watch::WatcherState;
 mod common;
 use common::*;
 
-fn ensure_watcher(w: &mut WatcherState, repo: &std::path::Path) -> u64 {
+fn ensure_watcher(w: &mut WatcherState, repo: &std::path::Path) {
     w.ensure(repo);
     thread::sleep(Duration::from_millis(300));
     w.poll();
-    thread::sleep(Duration::from_millis(150));
-    w.process_dirty();
-    w.generation(repo)
 }
 
-fn assert_gen_increases(w: &mut WatcherState, repo: &std::path::Path, before: u64) -> u64 {
+fn assert_version_bumped(w: &mut WatcherState, repo: &std::path::Path) {
+    let before = w.version(repo);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         w.poll();
-        thread::sleep(Duration::from_millis(150));
-        w.process_dirty();
-        let g = w.generation(repo);
-        if g > before { return g; }
+        if w.version(repo) > before { return; }
         thread::sleep(Duration::from_millis(20));
         if Instant::now() > deadline {
-            panic!("watcher generation did not increase within 5s (before={before}, current={g})");
+            panic!("repo version did not increase within 5s (before={before})");
         }
     }
 }
@@ -36,140 +31,140 @@ fn assert_gen_increases(w: &mut WatcherState, repo: &std::path::Path, before: u6
 #[test]
 fn cwd_field_differentiates_directories() {
     let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
+    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
     assert_eq!(k1.cwd, k2.cwd);
 }
 
 #[test]
 fn status_code_field_differentiates_exit_codes() {
     let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-    let k2 = cache::compute_cache_key(r.path(), 1, "vi", 120, 0, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
+    let k2 = cache::compute_cache_key(r.path(), 1, "vi", 120, 0, 0);
     assert_ne!(k1, k2);
 }
 
 #[test]
 fn keymap_field_differentiates_keymaps() {
     let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "emacs", 120, 0, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
+    let k2 = cache::compute_cache_key(r.path(), 0, "emacs", 120, 0, 0);
     assert_ne!(k1, k2);
 }
 
 #[test]
 fn terminal_width_field_differentiates_widths() {
     let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 80, 0, 1);
+    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
+    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 80, 0, 0);
     assert_ne!(k1, k2);
 }
 
-// ==== Watcher generation bump tests ====
+// ==== Dirty flag tests ====
 
 #[test]
-fn gen_bumps_on_file_create() {
+fn dirty_on_file_create() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.write("new_file.txt", "data");
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_file_delete() {
+fn dirty_on_file_delete() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("temp.txt", "data");
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.remove("temp.txt");
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_git_add() {
+fn dirty_on_git_add() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("unstaged.txt", "data");
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.git(&["add", "unstaged.txt"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_commit() {
+fn dirty_on_commit() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("b.txt", "world");
     r.git(&["add", "b.txt"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["commit", "-m", "second commit"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_checkout() {
+fn dirty_on_checkout() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.git(&["checkout", "other"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_checkout_new_branch() {
+fn dirty_on_checkout_new_branch() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.git(&["checkout", "-b", "feature"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_git_rm() {
+fn dirty_on_git_rm() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("toremove.txt", "delete me");
     r.git(&["add", "toremove.txt"]);
     r.git(&["commit", "-m", "add toremove.txt"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["rm", "toremove.txt"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_git_mv() {
+fn dirty_on_git_mv() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("old.txt", "rename me");
     r.git(&["add", "old.txt"]);
     r.git(&["commit", "-m", "add old.txt"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["mv", "old.txt", "new.txt"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_stash_push_pop() {
+fn dirty_on_stash_push_pop() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("stash.txt", "original");
     r.git(&["add", "stash.txt"]);
     r.git(&["commit", "-m", "add stash.txt"]);
     r.write("stash.txt", "modified");
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.git(&["stash", "push"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_reset_hard() {
+fn dirty_on_reset_hard() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("b.txt", "second");
@@ -177,39 +172,39 @@ fn gen_bumps_on_reset_hard() {
     r.git(&["commit", "-m", "second"]);
     r.write("a.txt", "modified");
     r.git(&["add", "a.txt"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["reset", "--hard", "HEAD~1"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_revert() {
+fn dirty_on_revert() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("revertable.txt", "will be reverted");
     r.git(&["add", "revertable.txt"]);
     r.git(&["commit", "-m", "to revert"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["revert", "--no-edit", "HEAD"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_commit_amend() {
+fn dirty_on_commit_amend() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     r.git(&["commit", "--amend", "-m", "amended initial"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_rebase() {
+fn dirty_on_rebase() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     let base_branch = current_branch(r.path());
@@ -221,15 +216,15 @@ fn gen_bumps_on_rebase() {
     r.write("mainline.txt", "mainline work");
     r.git(&["add", "mainline.txt"]);
     r.git(&["commit", "-m", "mainline commit"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["rebase", "rebase-feature"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_cherry_pick() {
+fn dirty_on_cherry_pick() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("cherry.txt", "cherry content");
@@ -239,15 +234,15 @@ fn gen_bumps_on_cherry_pick() {
         std::process::Command::new("git").arg("-C").arg(r.path()).args(["rev-parse", "HEAD"]).output().unwrap().stdout
     ).unwrap().trim().to_string();
     r.git(&["checkout", "other"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["cherry-pick", &commit_hash]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_merge() {
+fn dirty_on_merge() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     let base_branch = current_branch(r.path());
@@ -259,15 +254,15 @@ fn gen_bumps_on_merge() {
     r.write("mainline.txt", "mainline work");
     r.git(&["add", "mainline.txt"]);
     r.git(&["commit", "-m", "mainline work"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
     w.poll();
     r.git(&["merge", "other", "--no-edit"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_fetch() {
+fn dirty_on_fetch() {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -303,14 +298,14 @@ fn gen_bumps_on_fetch() {
     settle();
 
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, &wt_a);
+    ensure_watcher(&mut w, &wt_a);
 
     git(&wt_a, &["fetch"]);
-    assert_gen_increases(&mut w, &wt_a, g0);
+    assert_version_bumped(&mut w, &wt_a);
 }
 
 #[test]
-fn gen_bumps_on_pull() {
+fn dirty_on_pull() {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -346,14 +341,14 @@ fn gen_bumps_on_pull() {
     settle();
 
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, &wt_a);
+    ensure_watcher(&mut w, &wt_a);
 
     git(&wt_a, &["pull", "--no-edit"]);
-    assert_gen_increases(&mut w, &wt_a, g0);
+    assert_version_bumped(&mut w, &wt_a);
 }
 
 #[test]
-fn gen_bumps_on_push() {
+fn dirty_on_push() {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -373,82 +368,65 @@ fn gen_bumps_on_push() {
     r.git(&["commit", "-m", "another commit"]);
 
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, &repo_path);
+    ensure_watcher(&mut w, &repo_path);
     thread::sleep(Duration::from_millis(50));
     w.poll();
 
     git(&repo_path, &["push"]);
-    assert_gen_increases(&mut w, &repo_path, g0);
+    assert_version_bumped(&mut w, &repo_path);
 }
 
 #[test]
-fn gen_bumps_on_clean() {
+fn dirty_on_clean() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("untracked_clean.txt", "to be cleaned");
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.git(&["clean", "-f"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_gc() {
+fn dirty_on_gc() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.git(&["gc"]);
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_manual_rename() {
+fn dirty_on_manual_rename() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("rename_me.txt", "content");
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     std::fs::rename(r.path().join("rename_me.txt"), r.path().join("renamed.txt")).unwrap();
-    assert_gen_increases(&mut w, r.path(), g0);
+    assert_version_bumped(&mut w, r.path());
 }
 
 #[test]
-fn gen_bumps_on_ignored_file_create() {
+fn ignored_file_does_not_increase_version() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     std::fs::write(r.path().join(".gitignore"), "ignored_*\n").unwrap();
     r.git(&["add", ".gitignore"]);
     r.git(&["commit", "-m", "add gitignore"]);
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
+    let before = w.version(r.path());
     r.write("ignored_file.txt", "should be ignored by git");
-    std::thread::sleep(std::time::Duration::from_millis(2100));
+    std::thread::sleep(std::time::Duration::from_millis(300));
     w.poll();
-    w.process_dirty();
-    assert_eq!(w.generation(r.path()), g0, "gen should NOT increase for ignored file");
+    assert_eq!(w.version(r.path()), before, "ignored file should NOT increase version");
 }
 
 #[test]
-fn gen_bumps_on_branch_create() {
+fn dirty_on_branch_create() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
-    let g0 = ensure_watcher(&mut w, r.path());
+    ensure_watcher(&mut w, r.path());
     r.git(&["branch", "unrelated"]);
-    assert_gen_increases(&mut w, r.path(), g0);
-}
-
-// ==== Cache key stability tests ====
-
-#[test]
-fn cache_key_unchanged_after_git_ops_with_same_gen() {
-    let r = TestRepo::new();
-
-    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-
-    r.write("noise.txt", "should not affect cache key");
-    r.git(&["add", "noise.txt"]);
-    r.git(&["commit", "-m", "noise commit"]);
-
-    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-    assert_eq!(key_before, key_after,
-        "cache key must not change with same watcher_gen; mtimes should not differentiate");
+    assert_version_bumped(&mut w, r.path());
 }
 
 // ==== Config mtime test ====
@@ -461,15 +439,12 @@ fn config_mtime_changes_cache_key() {
     settle();
     let r = TestRepo::new();
 
-    let g0 = 1u64;
     let mtime_before = cache::get_mtime_ns(&cfg_path);
-    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_before, g0);
+    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_before, 0);
     std::fs::write(&cfg_path, "format = 'changed'\n").unwrap();
     settle();
     let mtime_after = cache::get_mtime_ns(&cfg_path);
-    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_after, g0);
+    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_after, 0);
 
     assert_ne!(key_before, key_after, "config change should produce different cache key (config_mtime tracked)");
 }
-
-

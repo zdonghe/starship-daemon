@@ -71,9 +71,8 @@ fn main() {
     loop {
         handles.push(connect_event);
         for w in &watcher.entries { handles.push(w.change_event); }
-        let timeout: DWORD = if watcher.entries.is_empty() { u32::MAX } else { 100 };
         let total = handles.len() as DWORD;
-        let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, timeout) };
+        let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, u32::MAX) };
         if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
             let idx = rc - ffi::WAIT_OBJECT_0;
             if idx == 0 {
@@ -82,8 +81,6 @@ fn main() {
             } else {
                 watcher.handle_event((idx - 1) as usize);
             }
-        } else if rc == ffi::WAIT_TIMEOUT {
-            watcher.process_dirty();
         }
         handles.clear();
     }
@@ -169,13 +166,16 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     }
 
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
-    if let Some(r) = repo_root { watcher.ensure(r); }
-    watcher.poll();
-    watcher.process_dirty();
-    let watcher_gen = repo_root.map_or(0, |r| watcher.generation(r));
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, watcher_gen);
-    let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
+    let v = if let Some(r) = repo_root {
+        watcher.ensure(r);
+        watcher.poll();
+        watcher.version(r)
+    } else {
+        0
+    };
 
+    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, v);
+    let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);
     send_response(pipe, &output);
     Ok(())

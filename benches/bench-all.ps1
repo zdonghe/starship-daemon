@@ -71,21 +71,21 @@ foreach ($v in $variants) {
         $lastExit = $LASTEXITCODE
         if ($lastExit -eq $null) { $lastExit = 0 }
         $result = Get-StarshipPrompt -ExitCode $lastExit -Keymap '' -Width $Host.UI.RawUI.WindowSize.Width
+        if (-not $result) { $script:nullCount++ }
         if ($result) { $result } else { "PS> " }
     }
 
     1..$Warmup | ForEach-Object { prompt | Out-Null }
-    $nullCount = 0
+    $script:nullCount = 0
     $times = 1..$Samples | ForEach-Object {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $r = prompt
         $sw.Stop()
-        if ([string]::IsNullOrEmpty($r)) { $nullCount++ }
         $sw.Elapsed.TotalMilliseconds
     }
     $s = $times | Sort-Object
     Write-Host ("  {0,-18} mean={1,7:N2} median={2,7:N2} p95={3,7:N2} max={4,7:N2} nulls={5}" -f $v.label, `
-        ($times | Measure-Object -Average).Average, $s[$s.Count / 2], $s[[int]($s.Count * 0.95)], $s[-1], $nullCount)
+        ($times | Measure-Object -Average).Average, $s[$s.Count / 2], $s[[int]($s.Count * 0.95)], $s[-1], $script:nullCount)
     $results += [PSCustomObject]@{ Config=$v.label; Mean="{0:N2}"-f($times|Measure-Object -Average).Average; Median="{0:N2}"-f$s[$s.Count/2]; P95="{0:N2}"-f$s[[int]($s.Count*0.95)]; Max="{0:N2}"-f$s[-1] }
 }
 

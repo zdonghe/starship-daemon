@@ -79,36 +79,64 @@ mod tests {
     }
 
     #[test]
-    fn compute_cache_key_no_git_dir() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let k = compute_cache_key(dir.path(), 0, "vi", 120, 0, 0);
-        assert_eq!(k.status_code, 0);
-        assert_eq!(k.keymap, "vi");
-        assert_eq!(k.terminal_width, 120);
-        assert_eq!(k.config_mtime, 0);
-        assert_eq!(k.watcher_gen, 0);
+    fn compute_cache_key_all_fields() {
+        let k = compute_cache_key(Path::new("/home/user"), 42, "emacs", 100, 7, 3);
+        let expected = CacheKey {
+            cwd: PathBuf::from("/home/user"), status_code: 42, keymap: "emacs".into(),
+            terminal_width: 100, config_mtime: 7, watcher_gen: 3,
+        };
+        assert_eq!(k, expected, "struct comparison catches swapped-field bugs");
+    }
+
+    #[test]
+    fn compute_cache_key_deterministic() {
+        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        assert_eq!(k1, k2);
     }
 
     #[test]
     fn compute_cache_key_different_status_code_differentiates() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(dir.path(), 1, "vi", 120, 0, 0);
+        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        let k2 = compute_cache_key(Path::new("/a"), 1, "vi", 120, 0, 0);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn compute_cache_key_different_keymap_differentiates() {
+        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        let k2 = compute_cache_key(Path::new("/a"), 0, "emacs", 120, 0, 0);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn compute_cache_key_different_terminal_width_differentiates() {
+        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 80, 0, 0);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn compute_cache_key_different_config_mtime_differentiates() {
+        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 7, 0);
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn compute_cache_key_different_watcher_gen_differentiates() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let k1 = compute_cache_key(dir.path(), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(dir.path(), 0, "vi", 120, 0, 5);
+        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 5);
         assert_ne!(k1, k2);
     }
 
     #[test]
-    fn compute_cache_key_with_nonexistent_cwd_still_works() {
-        let bad_cwd = Path::new("__nonexistent_cwd__");
-        let k = compute_cache_key(bad_cwd, 0, "vi", 120, 0, 0);
-        assert_eq!(k.config_mtime, 0);
+    fn compute_cache_key_nonexistent_cwd() {
+        let k = compute_cache_key(Path::new("__nonexistent__"), 0, "vi", 120, 0, 0);
+        let expected = CacheKey {
+            cwd: PathBuf::from("__nonexistent__"), status_code: 0, keymap: "vi".into(),
+            terminal_width: 120, config_mtime: 0, watcher_gen: 0,
+        };
+        assert_eq!(k, expected);
     }
 }

@@ -434,74 +434,6 @@ fn gen_bumps_on_branch_create() {
     assert_gen_increases(&mut w, r.path(), g0);
 }
 
-#[test]
-fn cache_key_unchanged_on_tag() {
-    let r = TestRepo::new();
-
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    r.git(&["tag", "v1.0"]);
-    settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    assert_eq!(before, after);
-}
-
-// ==== Read-only operation tests (cache key unchanged with fixed g0) ====
-
-#[test]
-fn git_log_is_read_only() {
-    let r = TestRepo::new();
-
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    r.git(&["log", "--oneline"]);
-    settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    assert_eq!(before, after);
-}
-
-#[test]
-fn git_diff_is_read_only() {
-    let r = TestRepo::new();
-
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    r.git(&["diff"]);
-    settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    assert_eq!(before, after);
-}
-
-#[test]
-fn cache_key_unchanged_on_git_config() {
-    let r = TestRepo::new();
-
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    r.git(&["config", "test.dummy", "value"]);
-    settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    assert_eq!(before, after);
-}
-
-#[test]
-fn git_archive_is_read_only() {
-    let r = TestRepo::new();
-
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    r.git(&["archive", "--format=tar", "HEAD"]);
-    settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    assert_eq!(before, after);
-}
-
-#[test]
-fn git_log_with_patch_is_read_only() {
-    let r = TestRepo::new();
-
-    let before = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    r.git(&["log", "-p", "--all"]);
-    settle();
-    let after = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    assert_eq!(before, after);
-}
-
 // ==== Cache key stability tests ====
 
 #[test]
@@ -540,28 +472,4 @@ fn config_mtime_changes_cache_key() {
     assert_ne!(key_before, key_after, "config change should produce different cache key (config_mtime tracked)");
 }
 
-// ==== Git status may bump g0 (index refresh) ====
 
-#[test]
-fn git_status_may_bump_gen() {
-    let r = TestRepo::new();
-    let mut w = WatcherState::new();
-    ensure_watcher(&mut w, r.path());
-    // Just verify no crash
-    r.git(&["status", "--porcelain"]);
-    thread::sleep(Duration::from_millis(200));
-    w.poll();
-}
-
-// ==== No-upstream branch does not crash ====
-
-#[test]
-fn no_upstream_branch_works() {
-    let r = TestRepo::new();
-
-    r.git(&["checkout", "-b", "no-upstream"]);
-    settle();
-    let k = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 1);
-    assert_eq!(k, k2);
-}

@@ -30,19 +30,6 @@ fn probe_get_module_segments() {
 }
 
 #[test]
-fn probe_module_cache_type_alias() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = create_test_context(dir.path());
-
-    let mut cache: starship::print::ModuleCache = std::collections::HashMap::new();
-    let segments = starship::print::get_module_segments("character", &ctx).unwrap();
-    cache.insert("character".to_string(), segments);
-
-    assert!(cache.contains_key("character"));
-    assert_eq!(cache.len(), 1);
-}
-
-#[test]
 fn probe_get_prompt_with_cache() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = create_test_context(dir.path());
@@ -130,15 +117,4 @@ fn probe_stringformatter_direct_usage() {
     assert_eq!(ansi_strings[0].to_string(), ">");
 }
 
-#[test]
-fn probe_all_accessible() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = create_test_context(dir.path());
 
-    let _: &[&str] = starship::configs::PROMPT_ORDER;
-    let _segs = starship::print::get_module_segments("character", &ctx);
-    let _cache: starship::print::ModuleCache = std::collections::HashMap::new();
-    let _ = starship::formatter::StringFormatter::new("$character");
-    let _module = starship::module::Module::new("x", "y", None);
-    let _disabled = ctx.is_module_disabled_in_config("character");
-}

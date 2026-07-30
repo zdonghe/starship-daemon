@@ -1,20 +1,6 @@
-cold and warm testing -> git_status is the slowest 
-
-now, benching what is causing the slowness in git_status
-
-don't think anything can be done about the warm/cold perf in git_status
-
-improve perf in cached state (i.e. pipe and other stuff)
-- cache git repo location
-
-external actions... i swear this was fixed, but still not. refer to git-fast
-- mostly subdir, cwd_mtime is the issue
-- going to take git-fast change
-
 keymap cachekey does not seem to work
 
 GetFileAttributesExW(..., 1, ...) — the earlier std::fs::metadata. GetFileAttributesExW i believe is faster
-
 
 i think that the method is to split up the src even more, to separate the cache system
 
@@ -25,10 +11,16 @@ for watcher_gen, if > 0, then we just ignore all events. there is no point to ke
 
 why tf do benches require recompilation
 
-why did bust dir disappear?
-
-how does multi instance work?
-
 do we just persistently watch repo's/folder handles, forever? gc approach from git-fast (introduces gc though)
 
+persistent connection model would also allow us to stop watching repo handles forever.
 
+improving .psm1 perf: there was something but i discarded
+
+cache locality
+
+think about background work
+
+unit tests:
+- ensure they are all actually accurate and thorough
+- add unit tests for ipc

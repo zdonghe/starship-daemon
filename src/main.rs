@@ -7,6 +7,7 @@ use lru::LruCache;
 use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::ffi::{self, HANDLE, DWORD, LPVOID, LPCVOID};
 use starship_daemon::watch::WatcherState;
+use starship_daemon::{ParsedRequest, parse_request};
 
 const PIPE_ACCESS_DUPLEX: DWORD = 3;
 const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
@@ -30,56 +31,6 @@ fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
 
 fn write_all(pipe: HANDLE, buf: &[u8]) -> bool {
     unsafe { let mut w: DWORD = 0; ffi::WriteFile(pipe, buf.as_ptr() as LPCVOID, buf.len() as DWORD, &mut w, std::ptr::null_mut()) != 0 }
-}
-
-struct ClientProps {
-    status_code: Option<i32>,
-    keymap: Option<String>,
-    terminal_width: Option<usize>,
-    starship_config: Option<String>,
-    disable_cache: Option<bool>,
-}
-
-impl ClientProps {
-    fn parse_json(data: &[u8]) -> Option<Self> {
-        let s = std::str::from_utf8(data).ok()?;
-        let s = s.trim().trim_start_matches('{').trim_end_matches('}');
-        let mut status_code = None;
-        let mut keymap = None;
-        let mut terminal_width = None;
-        let mut starship_config = None;
-        let mut disable_cache = None;
-        let mut i = 0;
-        let bytes = s.as_bytes();
-        while i < bytes.len() {
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b',' || bytes[i] == b'\t' || bytes[i] == b'\n') { i += 1; }
-            if i >= bytes.len() { break; }
-            if bytes[i] != b'"' { break; }
-            i += 1;
-            let ks = i; while i < bytes.len() && bytes[i] != b'"' { i += 1; }
-            if i >= bytes.len() { break; }
-            let key = std::str::from_utf8(&bytes[ks..i]).ok()?; i += 1;
-            while i < bytes.len() && bytes[i] != b':' { i += 1; }
-            if i >= bytes.len() { break; }
-            i += 1;
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') { i += 1; }
-            if i >= bytes.len() { break; }
-            if bytes[i] == b'"' {
-                i += 1; let vs = i;
-                while i < bytes.len() && bytes[i] != b'"' { i += 1; }
-                let val = std::str::from_utf8(&bytes[vs..i]).ok()?.to_string(); i += 1;
-                match key { "keymap" => keymap = Some(val), "starship_config" => starship_config = Some(val), _ => {} }
-            } else if i + 3 < bytes.len() && &bytes[i..i+4] == b"null" { i += 4; }
-            else if i + 3 < bytes.len() && &bytes[i..i+4] == b"true" { i += 4; match key { "disable_cache" => disable_cache = Some(true), _ => {} } }
-            else if i + 4 < bytes.len() && &bytes[i..i+5] == b"false" { i += 5; match key { "disable_cache" => disable_cache = Some(false), _ => {} } }
-            else {
-                let vs = i; while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' && bytes[i] != b' ' { i += 1; }
-                let val = std::str::from_utf8(&bytes[vs..i]).ok()?;
-                match key { "status_code" => status_code = val.parse::<i32>().ok(), "terminal_width" => terminal_width = val.parse::<usize>().ok(), _ => {} }
-            }
-        }
-        Some(ClientProps { status_code, keymap, terminal_width, starship_config, disable_cache })
-    }
 }
 
 fn main() {
@@ -158,21 +109,23 @@ fn send_response(pipe: HANDLE, output: &str) {
 }
 
 fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> Result<(), ()> {
-    let mut buf = [0u8; 8 + 32768];
+    let mut buf = [0u8; 4 + 32768 + 4 + 4096];
     if !read_exact(pipe, &mut buf[..4]) { bail!(pipe); }
     let cwd_len = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
     if cwd_len > 32768 { bail!(pipe); }
-    if !read_exact(pipe, &mut buf[..cwd_len]) { bail!(pipe); }
-    let cwd = PathBuf::from(String::from_utf8_lossy(&buf[..cwd_len]).as_ref());
-
-    if !read_exact(pipe, &mut buf[..4]) { bail!(pipe); }
-    let props_len = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
+    if !read_exact(pipe, &mut buf[4..4 + cwd_len]) { bail!(pipe); }
+    let props_start = 4 + cwd_len;
+    if !read_exact(pipe, &mut buf[props_start..props_start + 4]) { bail!(pipe); }
+    let props_len = u32::from_le_bytes(buf[props_start..props_start + 4].try_into().unwrap()) as usize;
     if props_len > 4096 { bail!(pipe); }
-    if !read_exact(pipe, &mut buf[..props_len]) { bail!(pipe); }
-    let props_bytes = &buf[..props_len];
-
+    let props_body_start = props_start + 4;
+    if !read_exact(pipe, &mut buf[props_body_start..props_body_start + props_len]) { bail!(pipe); }
+    let total = props_body_start + props_len;
+    let ParsedRequest { cwd, props } = match parse_request(&buf[..total]) {
+        Some(r) => r,
+        None => { bail!(pipe); }
+    };
     let git_dir = starship_daemon::find_git_dir(&cwd);
-    let props: ClientProps = match ClientProps::parse_json(&props_bytes) { Some(p) => p, None => { bail!(pipe); } };
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
 

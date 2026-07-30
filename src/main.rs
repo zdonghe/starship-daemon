@@ -19,9 +19,10 @@ macro_rules! bail { ($p:expr) => { unsafe { ffi::DisconnectNamedPipe($p); return
 
 fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
     unsafe {
-        let mut avail: DWORD = 0;
-        if ffi::PeekNamedPipe(pipe, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, &mut avail) != 0 {
-            if avail > buf.len() as DWORD { return false; }
+        let mut total: DWORD = 0;
+        let mut left: DWORD = 0;
+        if ffi::PeekNamedPipe(pipe, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut total, &mut left) != 0 {
+            if left > buf.len() as DWORD { return false; }
         }
         let mut r: DWORD = 0;
         ffi::ReadFile(pipe, buf.as_mut_ptr() as LPVOID, buf.len() as DWORD, &mut r, std::ptr::null_mut()) != 0

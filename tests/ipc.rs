@@ -105,7 +105,7 @@ impl DaemonProcess {
         let config_dir = tempfile::TempDir::new().unwrap();
         let config_path = config_dir.path().join("starship.toml");
         std::fs::write(&config_path,
-            b"format = \"$character\"\nadd_newline = false\n[character]\nformat = \"$\"\n"
+            b"format = \"$character\"\nadd_newline = false\n[character]\nformat = \">\"\n"
         ).unwrap();
 
         let daemon_exe = std::env::var("CARGO_BIN_EXE_starship-daemon")
@@ -262,4 +262,97 @@ fn ipc_disable_cache() {
         let resp = c.read_response().expect("response");
         check_response(&resp);
     });
+}
+
+mod common;
+use std::path::Path;
+
+#[test]
+fn ipc_git_push_stale_ahead() {
+    let bare_dir = tempfile::TempDir::new().unwrap();
+    let bare_path = bare_dir.path().join("remote.git");
+    std::fs::create_dir_all(&bare_path).unwrap();
+    common::git(&bare_path, &["init", "--bare"]);
+
+    let work_dir = tempfile::TempDir::new().unwrap();
+    let repo_path = work_dir.path().join("repo");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    common::git(&repo_path, &["init"]);
+    common::git(&repo_path, &["branch", "-M", "main"]);
+    common::git(&repo_path, &["config", "user.email", "test@test"]);
+    common::git(&repo_path, &["config", "user.name", "test"]);
+    common::git(&repo_path, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
+
+    std::fs::write(repo_path.join("init.txt"), "init").unwrap();
+    common::git(&repo_path, &["add", "init.txt"]);
+    common::git(&repo_path, &["commit", "-m", "init"]);
+    common::git(&repo_path, &["push", "-u", "origin", "main"]);
+    common::settle();
+
+    std::fs::write(repo_path.join("ahead.txt"), "ahead").unwrap();
+    common::git(&repo_path, &["add", "ahead.txt"]);
+    common::git(&repo_path, &["commit", "-m", "ahead"]);
+
+    let repo_str = repo_path.to_str().unwrap().to_string();
+
+    let config_dir = tempfile::TempDir::new().unwrap();
+    let config_path = config_dir.path().join("starship.toml");
+    std::fs::write(&config_path,
+        b"format = \"$git_status\"\nadd_newline = false\n[git_status]\nformat = \"$ahead_behind\"\n"
+    ).unwrap();
+
+    let lock = DAEMON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let daemon_exe = std::env::var("CARGO_BIN_EXE_starship-daemon")
+        .unwrap_or_else(|_| {
+            let mut p = std::env::current_exe().unwrap();
+            p.pop(); p.pop();
+            p.push("starship-daemon.exe");
+            p.display().to_string()
+        });
+
+    let mut process = std::process::Command::new(&daemon_exe)
+        .env("STARSHIP_CONFIG", &config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn daemon");
+
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(c) = PipeClient::connect(100) {
+            drop(c);
+            break;
+        }
+        if Instant::now() > deadline {
+            let _ = process.kill(); let _ = process.wait();
+            panic!("daemon did not become ready within 10s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        assert!(c.send_request(&repo_str, "{}"));
+        let before_push = c.read_response().expect("before push");
+        assert!(before_push.contains('⇡'),
+            "prompt should show ahead indicator before push, got: {before_push:?}");
+
+        common::git(Path::new(&repo_str), &["push"]);
+
+        let c2 = PipeClient::connect(1000).expect("second connect");
+        assert!(c2.send_request(&repo_str, "{}"));
+        let after_push = c2.read_response().expect("after push");
+
+        assert!(!after_push.contains('⇡'),
+            "BUG: cooldown race — stale cache still shows ⇡ after push\n\
+             Expected: prompt should NOT contain ⇡ (no longer ahead)\n\
+             Actual: ⇡ persists because 100ms cooldown blocks watcher gen bump\n\
+             When handle_client restructured to permit immediate dirty processing, this passes.");
+    });
+
+    let _ = process.kill();
+    let _ = process.wait();
+    drop(lock);
+    if let Err(e) = result { std::panic::resume_unwind(e); }
 }

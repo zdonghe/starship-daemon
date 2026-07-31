@@ -98,22 +98,26 @@ fn send_response(pipe: HANDLE, output: &str) {
     unsafe { ffi::FlushFileBuffers(pipe); ffi::DisconnectNamedPipe(pipe); }
 }
 
-fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> Result<(), ()> {
+fn read_request(pipe: HANDLE) -> Result<ParsedRequest, ()> {
     let mut buf = [0u8; 4 + 32768 + 4 + 4096];
-    if !read_exact(pipe, &mut buf[..4]) { pipe_error!(pipe); }
+    if !read_exact(pipe, &mut buf[..4]) { return Err(()); }
     let cwd_len = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
-    if cwd_len > 32768 { pipe_error!(pipe); }
-    if !read_exact(pipe, &mut buf[4..4 + cwd_len]) { pipe_error!(pipe); }
+    if cwd_len > 32768 { return Err(()); }
+    if !read_exact(pipe, &mut buf[4..4 + cwd_len]) { return Err(()); }
     let props_start = 4 + cwd_len;
-    if !read_exact(pipe, &mut buf[props_start..props_start + 4]) { pipe_error!(pipe); }
+    if !read_exact(pipe, &mut buf[props_start..props_start + 4]) { return Err(()); }
     let props_len = u32::from_le_bytes(buf[props_start..props_start + 4].try_into().unwrap()) as usize;
-    if props_len > 4096 { pipe_error!(pipe); }
+    if props_len > 4096 { return Err(()); }
     let props_body_start = props_start + 4;
-    if !read_exact(pipe, &mut buf[props_body_start..props_body_start + props_len]) { pipe_error!(pipe); }
+    if !read_exact(pipe, &mut buf[props_body_start..props_body_start + props_len]) { return Err(()); }
     let total = props_body_start + props_len;
-    let ParsedRequest { cwd, props } = match parse_request(&buf[..total]) {
-        Some(r) => r,
-        None => { pipe_error!(pipe); }
+    parse_request(&buf[..total]).ok_or(())
+}
+
+fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> Result<(), ()> {
+    let ParsedRequest { cwd, props } = match read_request(pipe) {
+        Ok(r) => r,
+        Err(()) => { pipe_error!(pipe); }
     };
     let git_dir = starship_daemon::find_git_dir(&cwd);
     let status_code = props.status_code.unwrap_or(0);

@@ -112,11 +112,7 @@ fn expand_all(context: &starship::context::Context) -> String {
         .filter(|m| !explicit.contains(m) && !context.is_module_disabled_in_config(m))
         .collect();
 
-    let replacement = if expanded.is_empty() {
-        String::new()
-    } else {
-        expanded.iter().map(|m| format!("${}", m)).collect::<String>()
-    };
+    let replacement: String = expanded.iter().map(|m| format!("${}", m)).collect();
 
     format_str.replace("${all}", &replacement).replace("$all", &replacement)
 }

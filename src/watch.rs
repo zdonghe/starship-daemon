@@ -125,7 +125,9 @@ impl WatcherState {
             pending: false,
         });
         let idx = self.entries.len() - 1;
-        let _ = start_watch(&mut self.entries[idx]);
+        if !start_watch(&mut self.entries[idx]) {
+            self.entries[idx].pending = true;
+        }
         self.repo_versions.insert(repo_root.to_path_buf(), 0);
     }
 
@@ -532,5 +534,22 @@ mod tests {
         assert!(bumped > v0, "pending flag must flush into a bump");
         w.poll();
         assert_eq!(w.version(&p), bumped, "idle poll must not bump again");
+    }
+
+    #[test]
+    fn ensure_on_initial_arm_failure_bumps_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("file.txt");
+        std::fs::write(&f, b"x").unwrap();
+        let mut w = WatcherState::new();
+        w.ensure(&f);
+        assert_eq!(w.entries.len(), 1, "entry created => CreateFileW succeeded, RDWC attempted");
+        assert!(w.entries[0].pending, "failed initial arm must set pending");
+        let v0 = w.version(&f);
+        w.poll();
+        let v1 = w.version(&f);
+        assert!(v1 > v0, "failed initial arm must bump once, got {v0} -> {v1}");
+        w.poll();
+        assert_eq!(w.version(&f), v1, "second poll must not bump again");
     }
 }

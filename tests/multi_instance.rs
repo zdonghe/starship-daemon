@@ -64,11 +64,11 @@ impl MultiRepoHarness {
 }
 
 // ============================================================
-// Dirty flag isolation
+// Version bump isolation
 // ============================================================
 
 #[test]
-fn dirty_isolation() {
+fn version_isolation() {
     let mut h = MultiRepoHarness::new();
 
     let v_a_before = h.watcher.version(h.a.path());

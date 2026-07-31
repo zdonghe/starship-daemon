@@ -13,10 +13,10 @@ fn ensure_watcher(w: &mut WatcherState, repo: &std::path::Path) {
     w.poll();
 }
 
-// ==== Dirty flag tests ====
+// ==== Version bump tests ====
 
 #[test]
-fn dirty_on_file_create() {
+fn bumps_on_file_create() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
@@ -25,7 +25,7 @@ fn dirty_on_file_create() {
 }
 
 #[test]
-fn dirty_on_file_delete() {
+fn bumps_on_file_delete() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("temp.txt", "data");
@@ -35,7 +35,7 @@ fn dirty_on_file_delete() {
 }
 
 #[test]
-fn dirty_on_git_add() {
+fn bumps_on_git_add() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("unstaged.txt", "data");
@@ -45,7 +45,7 @@ fn dirty_on_git_add() {
 }
 
 #[test]
-fn dirty_on_commit() {
+fn bumps_on_commit() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("b.txt", "world");
@@ -58,7 +58,7 @@ fn dirty_on_commit() {
 }
 
 #[test]
-fn dirty_on_checkout() {
+fn bumps_on_checkout() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
@@ -67,7 +67,7 @@ fn dirty_on_checkout() {
 }
 
 #[test]
-fn dirty_on_checkout_new_branch() {
+fn bumps_on_checkout_new_branch() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
@@ -76,7 +76,7 @@ fn dirty_on_checkout_new_branch() {
 }
 
 #[test]
-fn dirty_on_git_rm() {
+fn bumps_on_git_rm() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("toremove.txt", "delete me");
@@ -90,7 +90,7 @@ fn dirty_on_git_rm() {
 }
 
 #[test]
-fn dirty_on_git_mv() {
+fn bumps_on_git_mv() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("old.txt", "rename me");
@@ -104,7 +104,7 @@ fn dirty_on_git_mv() {
 }
 
 #[test]
-fn dirty_on_stash_push_pop() {
+fn bumps_on_stash_push_pop() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("stash.txt", "original");
@@ -117,7 +117,7 @@ fn dirty_on_stash_push_pop() {
 }
 
 #[test]
-fn dirty_on_reset_hard() {
+fn bumps_on_reset_hard() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("b.txt", "second");
@@ -133,7 +133,7 @@ fn dirty_on_reset_hard() {
 }
 
 #[test]
-fn dirty_on_revert() {
+fn bumps_on_revert() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("revertable.txt", "will be reverted");
@@ -147,7 +147,7 @@ fn dirty_on_revert() {
 }
 
 #[test]
-fn dirty_on_commit_amend() {
+fn bumps_on_commit_amend() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
@@ -157,7 +157,7 @@ fn dirty_on_commit_amend() {
 }
 
 #[test]
-fn dirty_on_rebase() {
+fn bumps_on_rebase() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     let base_branch = current_branch(r.path());
@@ -177,7 +177,7 @@ fn dirty_on_rebase() {
 }
 
 #[test]
-fn dirty_on_cherry_pick() {
+fn bumps_on_cherry_pick() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("cherry.txt", "cherry content");
@@ -195,7 +195,7 @@ fn dirty_on_cherry_pick() {
 }
 
 #[test]
-fn dirty_on_merge() {
+fn bumps_on_merge() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     let base_branch = current_branch(r.path());
@@ -215,7 +215,7 @@ fn dirty_on_merge() {
 }
 
 #[test]
-fn dirty_on_fetch() {
+fn bumps_on_fetch() {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -258,7 +258,7 @@ fn dirty_on_fetch() {
 }
 
 #[test]
-fn dirty_on_pull() {
+fn bumps_on_pull() {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -301,7 +301,7 @@ fn dirty_on_pull() {
 }
 
 #[test]
-fn dirty_on_push() {
+fn bumps_on_push() {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -330,7 +330,7 @@ fn dirty_on_push() {
 }
 
 #[test]
-fn dirty_on_clean() {
+fn bumps_on_clean() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("untracked_clean.txt", "to be cleaned");
@@ -340,7 +340,7 @@ fn dirty_on_clean() {
 }
 
 #[test]
-fn dirty_on_gc() {
+fn bumps_on_gc() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
@@ -349,7 +349,7 @@ fn dirty_on_gc() {
 }
 
 #[test]
-fn dirty_on_manual_rename() {
+fn bumps_on_manual_rename() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("rename_me.txt", "content");
@@ -374,7 +374,7 @@ fn ignored_file_does_not_increase_version() {
 }
 
 #[test]
-fn dirty_on_branch_create() {
+fn bumps_on_branch_create() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());

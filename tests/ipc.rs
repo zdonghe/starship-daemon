@@ -13,6 +13,15 @@ fn pipe_path() -> String {
         .unwrap_or_else(|_| PIPE_PATH.to_string())
 }
 
+fn unique_pipe_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let name = format!("starship-daemon-test-{}", std::process::id());
+        unsafe { std::env::set_var("STARSHIP_DAEMON_PIPE", &name); }
+        name
+    })
+}
+
 static DAEMON_LOCK: Mutex<()> = Mutex::new(());
 
 struct PipeClient {
@@ -111,6 +120,8 @@ impl DaemonProcess {
         let config_dir = tempfile::TempDir::new().unwrap();
         let config_path = config_dir.path().join("starship.toml");
         std::fs::write(&config_path, config_toml.as_bytes()).unwrap();
+
+        unique_pipe_name();
 
         let daemon_exe = std::env::var("CARGO_BIN_EXE_starship-daemon")
             .unwrap_or_else(|_| {

@@ -284,7 +284,7 @@ fn main() {
     }
 
     let mut watcher = WatcherState::new();
-    let mut handles = Vec::with_capacity(MAX_SESSIONS + watcher.num_entries());
+    let mut handles = Vec::with_capacity(MAX_SESSIONS);
 
     loop {
         let now = Instant::now();
@@ -294,26 +294,21 @@ fn main() {
             }
         }
         for s in &sessions { handles.push(s.event); }
-        handles.extend(watcher.change_events());
         let timeout: DWORD = 1000;
         let total = handles.len() as DWORD;
         let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, timeout) };
+        watcher.process_signaled();
         if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
             let idx = (rc - ffi::WAIT_OBJECT_0) as usize;
-            if idx < sessions.len() {
-                let s = &mut sessions[idx];
-                s.last_activity = Instant::now();
-                if s.active {
-                    drain_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
-                } else {
-                    s.active = true;
-                    if issue_read(s) {
-                        drain_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
-                    }
-                }
+            let s = &mut sessions[idx];
+            s.last_activity = Instant::now();
+            if s.active {
+                drain_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
             } else {
-                let w_idx = idx - sessions.len();
-                watcher.handle_event(w_idx);
+                s.active = true;
+                if issue_read(s) {
+                    drain_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
+                }
             }
         }
         handles.clear();

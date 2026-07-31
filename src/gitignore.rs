@@ -19,12 +19,12 @@ pub fn load_gitignore(repo_root: &Path) -> Option<GitignoreFilter> {
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
-        let negate = line.starts_with('!');
-        let trimmed = if negate { &line[1..] } else { line };
-        let anchored = trimmed.starts_with('/');
-        let stripped = if anchored { &trimmed[1..] } else { trimmed };
-        let dir_only = stripped.ends_with('/');
-        let pattern = if dir_only { &stripped[..stripped.len()-1] } else { stripped };
+        let trimmed = line.strip_prefix('!').unwrap_or(line);
+        let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
+        let pattern = stripped.strip_suffix('/').unwrap_or(stripped);
+        let negate = line != trimmed;
+        let anchored = trimmed != stripped;
+        let dir_only = stripped != pattern;
         if pattern.is_empty() { continue; }
         let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
         rules.push(Rule { parts, negate, dir_only, anchored });

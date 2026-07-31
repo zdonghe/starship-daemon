@@ -117,10 +117,6 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
 mod tests {
     use super::*;
 
-    // ====================
-    // ClientProps::parse_json
-    // ====================
-
     #[test]
     fn parse_json_empty_object() {
         let r = ClientProps::parse_json(b"{}");
@@ -246,10 +242,6 @@ mod tests {
         assert_eq!(p.terminal_width, Some(80));
         assert_eq!(p.disable_cache, Some(true));
     }
-
-    // ====================
-    // parse_request
-    // ====================
 
     fn encode_request(cwd: &str, props: &str) -> Vec<u8> {
         let cwd_b = cwd.as_bytes();

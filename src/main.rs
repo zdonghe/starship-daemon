@@ -52,18 +52,12 @@ fn main() {
     rearm_connect(pipe, &mut connect_ol, connect_event);
     println!("starship-daemon started on {}", starship_daemon::PIPE_NAME);
 
-    {
-        let warm_ctx = RenderContext {
-            cwd: PathBuf::from("."),
-            terminal_width: 120,
-            status_code: 0,
-            keymap: "vi".to_string(),
-        };
-        let warm_key = cache::compute_cache_key(
-            Path::new("."), 0, "vi", 120, 0, 0,
-        );
-        let _ = cache::render_cached(&warm_ctx, None, &cached_config, &warm_key, &mut lru);
-    }
+    let _ = cache::render_cached(
+        &RenderContext { cwd: PathBuf::from("."), terminal_width: 120, status_code: 0, keymap: "vi".to_string() },
+        None, &cached_config,
+        &cache::compute_cache_key(Path::new("."), 0, "vi", 120, 0, 0),
+        &mut lru,
+    );
 
     let mut watcher = WatcherState::new();
     let mut handles = Vec::new();
@@ -125,23 +119,17 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
 
-    let mut cfg_changed = false;
     if let Some(ref req) = props.starship_config {
         let p = PathBuf::from(req);
         if p != *config_path {
             if let Some(new_cfg) = cache::load_config(&p) {
                 *config_path = new_cfg;
-                lru.clear();
-                cache::clear_repo_cache();
                 unsafe { std::env::set_var("STARSHIP_CONFIG", req); }
-                *cached_config = cache::read_config(config_path);
-                *last_cfg_mtime = cache::get_mtime_ns(config_path);
-                cfg_changed = true;
             }
         }
     }
 
-    let cur_cfg_mtime = if !cfg_changed {
+    let cur_cfg_mtime = {
         let mtime = cache::get_mtime_ns(config_path);
         if mtime != *last_cfg_mtime {
             *last_cfg_mtime = mtime;
@@ -150,14 +138,12 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
             cache::clear_repo_cache();
         }
         mtime
-    } else {
-        *last_cfg_mtime
     };
 
     let tw = props.terminal_width.unwrap_or(120);
 
     if props.disable_cache.unwrap_or(false) {
-        let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
+        let ctx = RenderContext { cwd, terminal_width: tw, status_code, keymap };
         let output = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
         send_response(pipe, &output);
         return Ok(());

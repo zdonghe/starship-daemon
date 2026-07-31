@@ -18,6 +18,10 @@ const FILE_NOTIFY_CHANGE_DIR_NAME: DWORD = 2;
 const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
 const CHANGE_BUF_SIZE: u32 = 65536;
 
+fn ol_ptr(ol: &mut ffi::OVERLAPPED) -> *mut c_void {
+    ol as *mut _ as *mut c_void
+}
+
 fn is_git_internal(path: &str) -> bool {
     let trimmed = path.trim_start_matches('/');
     if let Some(rest) = trimmed.strip_prefix(".git/") {
@@ -67,9 +71,9 @@ impl Drop for WatchEntry {
     fn drop(&mut self) {
         unsafe {
             if self.dir_handle != ffi::INVALID_HANDLE_VALUE {
-                if ffi::CancelIoEx(self.dir_handle, &mut self.overlapped as *mut _ as *mut c_void) != 0 {
+                if ffi::CancelIoEx(self.dir_handle, ol_ptr(&mut self.overlapped)) != 0 {
                     let mut bytes: DWORD = 0;
-                    let _ = ffi::GetOverlappedResult(self.dir_handle, &mut self.overlapped as *mut _ as *mut c_void, &mut bytes, 1);
+                    let _ = ffi::GetOverlappedResult(self.dir_handle, ol_ptr(&mut self.overlapped), &mut bytes, 1);
                 }
                 ffi::CloseHandle(self.dir_handle);
             }
@@ -131,7 +135,7 @@ impl WatcherState {
             let we = &mut self.entries[idx];
             let mut bytes: DWORD = 0;
             let ok = unsafe {
-                ffi::GetOverlappedResult(we.dir_handle, &mut we.overlapped as *mut _ as *mut c_void, &mut bytes, 1)
+                ffi::GetOverlappedResult(we.dir_handle, ol_ptr(&mut we.overlapped), &mut bytes, 1)
             };
             let changed = if ok != 0 {
                 if bytes == 0 {
@@ -168,12 +172,7 @@ impl WatcherState {
     }
 
     pub fn poll(&mut self) {
-        for i in 0..self.entries.len() {
-            let rc = unsafe { ffi::WaitForSingleObject(self.entries[i].change_event, 0) };
-            if rc == ffi::WAIT_OBJECT_0 {
-                self.handle_event(i);
-            }
-        }
+        self.process_signaled();
         self.flush();
     }
 
@@ -206,7 +205,7 @@ fn start_watch(we: &mut WatchEntry) -> bool {
         let mut bytes: DWORD = 0;
         ffi::ReadDirectoryChangesW(we.dir_handle, we.change_buf.as_mut_ptr() as LPVOID, CHANGE_BUF_SIZE, 1,
             FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            &mut bytes, &mut we.overlapped as *mut _ as *mut c_void, std::ptr::null()) != 0
+            &mut bytes, ol_ptr(&mut we.overlapped), std::ptr::null()) != 0
     }
 }
 

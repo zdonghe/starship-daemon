@@ -33,6 +33,10 @@ struct RepoCache {
 static REPO_CACHE: Mutex<Option<RepoCache>> = Mutex::new(None);
 static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn lock_repo_cache() -> std::sync::MutexGuard<'static, Option<RepoCache>> {
+    REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn get_or_create_ctx(
     git_dir: Option<&Path>,
     current_dir: &Path,
@@ -40,7 +44,7 @@ fn get_or_create_ctx(
 ) -> starship::context::Context<'static> {
     if let Some(gd) = git_dir {
         let index_mtime = get_mtime_ns(&gd.join("index"));
-        let mut cache = REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cache = lock_repo_cache();
         if let Some(ref mut cached) = *cache {
             if cached.git_dir == gd && cached.index_mtime == index_mtime {
                 if let Some(sctx) = cached.ctx.take() {
@@ -59,40 +63,13 @@ fn get_or_create_ctx(
 }
 
 pub fn clear_repo_cache() {
-    *REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *lock_repo_cache() = None;
 }
 
 fn make_bust_dir(git_dir: &Path) -> PathBuf {
     let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&bust);
     bust
-}
-
-pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
-    let (current_dir, bust_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
-        Some(ref gd) => {
-            let bust = make_bust_dir(gd);
-            (bust.clone(), Some(bust))
-        }
-        None => (ctx.cwd.clone(), None),
-    };
-
-    let mut properties = starship::context::Properties::default();
-    properties.status_code = Some(ctx.status_code.to_string());
-    properties.keymap = ctx.keymap.clone();
-
-    let env = starship::context::Env::default();
-    let mut sctx = starship::context::Context::new_with_shell_and_path(
-        properties, starship::context::Shell::Pwsh, starship::context::Target::Main,
-        current_dir, ctx.cwd.clone(), env,
-    );
-    sctx.width = ctx.terminal_width;
-
-    let result = starship::print::get_prompt(&sctx);
-    if let Some(dir) = bust_dir {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    result.trim_end_matches('\n').to_string()
 }
 
 pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
@@ -113,7 +90,7 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
     if let Some(dir) = bust_dir {
         let _ = std::fs::remove_dir_all(dir);
     }
-    result.trim_end_matches('\n').to_string()
+    trim_prompt(&result)
 }
 
 fn expand_all(context: &starship::context::Context) -> String {
@@ -191,7 +168,7 @@ fn resolve_format(sctx: &starship::context::Context) -> String {
 
 fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
     let index_mtime = get_mtime_ns(&gd.join("index"));
-    let mut rc = REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut rc = lock_repo_cache();
     *rc = Some(RepoCache { git_dir: gd.to_path_buf(), index_mtime, ctx: Some(sctx) });
 }
 
@@ -204,6 +181,10 @@ fn prepare_and_resolve(
     let sctx = prepare_ctx(resolved_gd, current_dir, ctx, config);
     let fmt = resolve_format(&sctx);
     (sctx, fmt)
+}
+
+fn trim_prompt(s: &str) -> String {
+    s.trim_end_matches('\n').to_string()
 }
 
 pub fn render_cached(
@@ -227,7 +208,7 @@ pub fn render_cached(
 
         let (sctx, fmt) = prepare_and_resolve(resolved_gd.as_deref(), &ctx.cwd, ctx, config);
         let r = get_prompt_with_cache(&sctx, &entry.segments, &fmt);
-        let rendered = r.trim_end_matches('\n').to_string();
+        let rendered = trim_prompt(&r);
         entry.rendered = rendered.clone();
         entry.time_bucket = tb;
         lru.put(key, entry);
@@ -253,7 +234,7 @@ pub fn render_cached(
     let mut module_cache = ModuleCache::new();
     populate_cache(&sctx, &fmt, &mut module_cache);
     let rendered = get_prompt_with_cache(&sctx, &module_cache, &fmt);
-    let rendered = rendered.trim_end_matches('\n').to_string();
+    let rendered = trim_prompt(&rendered);
     lru.put(full_key.clone(), CachedValue {
         rendered: rendered.clone(),
         segments: module_cache,

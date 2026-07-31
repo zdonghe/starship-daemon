@@ -12,6 +12,10 @@ pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 
 pub const WAIT_OBJECT_0: DWORD = 0;
 pub const WAIT_TIMEOUT: DWORD = 0x00000102;
+pub const INFINITE: DWORD = 0xFFFFFFFF;
+
+pub const ERROR_NOT_FOUND: DWORD = 1168;
+pub const ERROR_IO_INCOMPLETE: DWORD = 996;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

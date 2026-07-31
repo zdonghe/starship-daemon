@@ -8,7 +8,7 @@ use std::ffi::c_void;
 use lru::LruCache;
 use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::ffi::{self, HANDLE, DWORD, LPVOID, LPCVOID};
-use starship_daemon::watch::WatcherState;
+use starship_daemon::watch::{WatcherState, MAX_WATCHED_REPOS};
 use starship_daemon::{ParsedRequest, parse_request};
 
 const PIPE_ACCESS_DUPLEX: DWORD = 3;
@@ -17,12 +17,12 @@ const PIPE_TYPE_MESSAGE: DWORD = 4;
 const PIPE_WAIT: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
 const ERROR_IO_PENDING: DWORD = 997;
-const ERROR_IO_INCOMPLETE: DWORD = 996;
 const PIPE_READMODE_BYTE: DWORD = 0;
 const MAX_SESSIONS: usize = 8;
 const MAX_IDLE_MS: u128 = 5000;
 const MAX_REQS_PER_WAKE: u32 = 8;
 const BUF_SIZE: usize = 4 + 32768 + 4 + 4096;
+const IDLE_SWEEP_MS: DWORD = 1000;
 
 #[derive(Clone, Copy)]
 enum ReadStage {
@@ -96,7 +96,7 @@ fn complete_read(s: &mut Session) -> Option<u32> {
         let mut bytes: DWORD = 0;
         let ok = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 0);
         if ok != 0 { return Some(bytes); }
-        if ffi::GetLastError() == ERROR_IO_INCOMPLETE { return None; }
+        if ffi::GetLastError() == ffi::ERROR_IO_INCOMPLETE { return None; }
         Some(0)
     }
 }
@@ -126,7 +126,7 @@ fn complete_write(s: &mut Session) -> Option<u32> {
         let ok = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 0);
         if ok != 0 && bytes == s.write_buf.len() as DWORD { return Some(bytes); }
         if ok != 0 { return Some(0); }
-        if ffi::GetLastError() == ERROR_IO_INCOMPLETE { return None; }
+        if ffi::GetLastError() == ffi::ERROR_IO_INCOMPLETE { return None; }
         Some(0)
     }
 }
@@ -372,7 +372,7 @@ fn main() {
     }
 
     let mut watcher = WatcherState::new();
-    let mut handles = Vec::with_capacity(MAX_SESSIONS);
+    let mut handles = Vec::with_capacity(MAX_SESSIONS + MAX_WATCHED_REPOS);
 
     loop {
         let now = Instant::now();
@@ -382,7 +382,11 @@ fn main() {
             }
         }
         for s in &sessions { handles.push(s.event); }
-        let timeout: DWORD = 100;
+        for i in 0..watcher.num_entries() { handles.push(watcher.change_event(i)); }
+        // Sleep until a connect, a watcher completion, or (only while a session
+        // is active) a periodic tick that reaps stalled clients. With no active
+        // sessions the daemon blocks indefinitely - no polling.
+        let timeout: DWORD = if sessions.iter().any(|s| s.active) { IDLE_SWEEP_MS } else { ffi::INFINITE };
         let total = handles.len() as DWORD;
         let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, timeout) };
         watcher.process_signaled();

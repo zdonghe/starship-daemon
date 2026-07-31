@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -17,6 +16,10 @@ const FILE_NOTIFY_CHANGE_FILE_NAME: DWORD = 1;
 const FILE_NOTIFY_CHANGE_DIR_NAME: DWORD = 2;
 const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
 const CHANGE_BUF_SIZE: u32 = 65536;
+
+// Max concurrently watched repos. The daemon's wait set is 8 session events +
+// MAX_WATCHED_REPOS watcher events; must stay under MAXIMUM_WAIT_OBJECTS (64).
+pub const MAX_WATCHED_REPOS: usize = 48;
 
 fn ol_ptr(ol: &mut ffi::OVERLAPPED) -> *mut c_void {
     ol as *mut _ as *mut c_void
@@ -65,13 +68,21 @@ pub struct WatchEntry {
     overlapped: ffi::OVERLAPPED,
     ignore: Option<GitignoreFilter>,
     pending: bool,
+    armed: bool,
+    last_touch: u64,
+    version: u64,
 }
 
 impl Drop for WatchEntry {
     fn drop(&mut self) {
         unsafe {
             if self.dir_handle != ffi::INVALID_HANDLE_VALUE {
-                if ffi::CancelIoEx(self.dir_handle, ol_ptr(&mut self.overlapped)) != 0 {
+                // Only skip the settle wait when CancelIoEx reports that no
+                // operation was queued (ERROR_NOT_FOUND). Any other failure is
+                // ambiguous and the op may still be in flight, so wait for it.
+                if ffi::CancelIoEx(self.dir_handle, ol_ptr(&mut self.overlapped)) != 0
+                    || ffi::GetLastError() != ffi::ERROR_NOT_FOUND
+                {
                     let mut bytes: DWORD = 0;
                     let _ = ffi::GetOverlappedResult(self.dir_handle, ol_ptr(&mut self.overlapped), &mut bytes, 1);
                 }
@@ -83,21 +94,45 @@ impl Drop for WatchEntry {
 }
 
 pub struct WatcherState {
-    pub(crate) entries: Vec<WatchEntry>,
-    repo_versions: HashMap<PathBuf, u64>,
+    pub(crate) entries: Vec<Box<WatchEntry>>,
+    // Version dispenser: consumed by entry creation and every flush bump.
+    // Starts at 1 so 0 unambiguously means "unknown repo".
+    epoch: u64,
+    // LRU stamp dispenser: consumed by entry creation and every ensure touch.
+    touch: u64,
 }
 
 impl WatcherState {
     pub fn new() -> Self {
-        WatcherState { entries: Vec::new(), repo_versions: HashMap::new() }
+        WatcherState { entries: Vec::new(), epoch: 1, touch: 0 }
     }
 
     pub fn version(&self, repo_root: &Path) -> u64 {
-        self.repo_versions.get(repo_root).copied().unwrap_or(0)
+        for e in &self.entries {
+            if e.repo_root == repo_root { return e.version; }
+        }
+        0
     }
 
     pub fn ensure(&mut self, repo_root: &Path) {
-        if self.repo_versions.contains_key(repo_root) { return; }
+        // Touch an existing entry; re-arm a dead one. A revived watch must
+        // force one bump to cover changes that landed while it was dead, and a
+        // failed re-arm bumps too so the entry stays fresh rather than frozen.
+        for i in 0..self.entries.len() {
+            if self.entries[i].repo_root == repo_root {
+                self.entries[i].last_touch = self.touch;
+                self.touch += 1;
+                if !self.entries[i].armed {
+                    let start_ok = start_watch(&mut self.entries[i]);
+                    self.entries[i].armed = start_ok;
+                    self.entries[i].pending = true;
+                }
+                return;
+            }
+        }
+        if self.entries.len() >= MAX_WATCHED_REPOS {
+            self.evict_lru();
+        }
         let dir_handle;
         let change_event;
         unsafe {
@@ -115,7 +150,7 @@ impl WatcherState {
             }
         }
         let ignore = load_gitignore(repo_root);
-        self.entries.push(WatchEntry {
+        let mut entry = Box::new(WatchEntry {
             repo_root: repo_root.to_path_buf(),
             dir_handle,
             change_buf: vec![0u8; CHANGE_BUF_SIZE as usize],
@@ -123,12 +158,33 @@ impl WatcherState {
             overlapped: unsafe { mem::zeroed() },
             ignore,
             pending: false,
+            armed: false,
+            last_touch: self.touch,
+            version: self.epoch,
         });
-        let idx = self.entries.len() - 1;
-        if !start_watch(&mut self.entries[idx]) {
-            self.entries[idx].pending = true;
+        self.epoch += 1;
+        self.touch += 1;
+        // Arm through the box: the boxed allocation is stable for the life of
+        // the entry, so the kernel's pointer to `overlapped` stays valid.
+        // Arming a stack-local and then boxing it would leave the kernel
+        // writing completion data into the dead stack frame.
+        entry.armed = start_watch(&mut entry);
+        if !entry.armed {
+            entry.pending = true;
         }
-        self.repo_versions.insert(repo_root.to_path_buf(), 0);
+        self.entries.push(entry);
+    }
+
+    fn evict_lru(&mut self) {
+        let mut victim = 0usize;
+        let mut oldest = self.entries[0].last_touch;
+        for (i, e) in self.entries.iter().enumerate().skip(1) {
+            if e.last_touch < oldest {
+                oldest = e.last_touch;
+                victim = i;
+            }
+        }
+        self.entries.swap_remove(victim);
     }
 
     pub fn handle_event(&mut self, idx: usize) {
@@ -145,18 +201,38 @@ impl WatcherState {
                 } else {
                     let len = (bytes as usize).min(we.change_buf.len());
                     let paths = extract_watcher_paths(&we.change_buf[..len]);
-                    paths.iter().any(|(path, _)| {
+                    // Reload the ignore filter when this batch touches
+                    // .gitignore. Check BEFORE filtering: the old filter may
+                    // itself ignore .gitignore and would otherwise suppress the
+                    // reload and the bump, caching the stale rules forever.
+                    let mut reload = false;
+                    for (path, _) in &paths {
+                        if path == ".gitignore" { reload = true; break; }
+                    }
+                    if reload {
+                        we.ignore = load_gitignore(&we.repo_root);
+                    }
+                    // A reload is itself a visible change even when the new
+                    // rules filter .gitignore out of this batch (e.g. a `*`
+                    // rule): without this the new rules would be cached with
+                    // no bump and the old ones kept forever.
+                    let matches = paths.iter().any(|(path, _)| {
                         if is_git_internal(path) { return false; }
                         if let Some(ref ig) = we.ignore {
                             if is_ignored_str(ig, path) { return false; }
                         }
                         true
-                    })
+                    });
+                    reload || matches
                 }
             } else {
-                false
+                // Errored completion (e.g. ERROR_NOTIFY_ENUM_DIR on kernel
+                // buffer overflow): the buffered batch is lost, so treat it as
+                // a change to avoid a stale cache with no self-heal.
+                true
             };
             let start_ok = start_watch(we);
+            we.armed = start_ok;
             changed || !start_ok
         };
         if changed {
@@ -168,7 +244,8 @@ impl WatcherState {
         for e in &mut self.entries {
             if e.pending {
                 e.pending = false;
-                *self.repo_versions.entry(e.repo_root.clone()).or_insert(0) += 1;
+                e.version = self.epoch;
+                self.epoch += 1;
             }
         }
     }
@@ -239,6 +316,25 @@ mod tests {
                 panic!("version did not become stable within 5s (v={v})");
             }
         }
+    }
+
+    #[test]
+    fn boxed_arm_filters_ignored_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("repo");
+        std::fs::create_dir_all(p.join("a").join("x")).unwrap();
+        std::fs::write(p.join(".gitignore"), "a/**/b\n").unwrap();
+        let mut w = WatcherState::new();
+        w.ensure(&p);
+        let v0 = w.version(&p);
+        std::fs::write(p.join("a").join("x").join("b"), b"hello").unwrap();
+        for _ in 0..10 {
+            w.poll();
+            assert_eq!(w.version(&p), v0, "a/x/b must match anchored a/**/b and not bump");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::fs::write(p.join("visible.txt"), b"hello").unwrap();
+        wait_for_version_bump(&mut w, &p, v0);
     }
 
     #[test]
@@ -535,5 +631,130 @@ mod tests {
         assert!(v1 > v0, "failed initial arm must bump once, got {v0} -> {v1}");
         w.poll();
         assert_eq!(w.version(&f), v1, "second poll must not bump again");
+    }
+
+    #[test]
+    fn many_repos_all_bump_after_reallocs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = WatcherState::new();
+        let mut repos = Vec::new();
+        for i in 0..9 {
+            let p = dir.path().join(format!("r{i}"));
+            std::fs::create_dir_all(&p).unwrap();
+            w.ensure(&p);
+            repos.push(p);
+        }
+        assert_eq!(w.entries.len(), 9);
+        for (i, p) in repos.iter().enumerate() {
+            let v0 = w.version(p);
+            std::fs::write(p.join(format!("f{i}.txt")), b"x").unwrap();
+            wait_for_version_bump(&mut w, p, v0);
+        }
+    }
+
+    #[test]
+    fn lru_eviction_caps_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = WatcherState::new();
+        for i in 0..49 {
+            let p = dir.path().join(format!("r{i}"));
+            std::fs::create_dir_all(&p).unwrap();
+            w.ensure(&p);
+        }
+        assert_eq!(w.num_entries(), MAX_WATCHED_REPOS);
+        let p0 = dir.path().join("r0");
+        assert_eq!(w.version(&p0), 0, "oldest repo must be evicted at the cap");
+        w.ensure(&p0);
+        assert!(w.version(&p0) > 0, "re-ensured repo must get a fresh version");
+    }
+
+    #[test]
+    fn ensure_rearms_a_dead_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("file.txt");
+        std::fs::write(&f, b"x").unwrap();
+        let mut w = WatcherState::new();
+        w.ensure(&f);
+        assert_eq!(w.entries.len(), 1);
+        assert!(!w.entries[0].armed, "RDWC on a regular file must fail to arm");
+        w.ensure(&f);
+        assert!(!w.entries[0].armed, "re-arm on a regular file must still fail");
+        assert!(w.entries[0].pending, "re-arm attempt must set pending");
+        let v0 = w.version(&f);
+        w.poll();
+        assert!(w.version(&f) > v0, "pending from the re-arm must flush into a bump");
+    }
+
+    #[test]
+    fn reensure_version_exceeds_all_prior_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let mut w = WatcherState::new();
+        w.ensure(&a);
+        for _ in 0..60 {
+            w.entries[0].pending = true;
+            w.flush();
+        }
+        let pre = w.version(&a);
+        assert!(pre > 60, "60 flushes must push the version past 60, got {pre}");
+        for i in 0..48 {
+            let r = dir.path().join(format!("r{i}"));
+            std::fs::create_dir_all(&r).unwrap();
+            w.ensure(&r);
+        }
+        assert_eq!(w.version(&a), 0, "repo must be evicted after 48 more repos");
+        w.ensure(&a);
+        assert!(w.version(&a) > pre, "re-ensured version must exceed every prior version");
+    }
+
+    #[test]
+    fn gitignore_reload_picks_up_rule_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("repo");
+        std::fs::create_dir_all(&p).unwrap();
+        let mut w = WatcherState::new();
+        w.ensure(&p);
+
+        let v_start = w.version(&p);
+        std::fs::write(p.join(".gitignore"), "target.txt\n").unwrap();
+        wait_for_version_bump(&mut w, &p, v_start);
+        let reload_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            w.poll();
+            let live = w.entries[0].ignore.as_ref().is_some_and(|ig| ig.rules.iter().any(|r| r.parts == ["target.txt"]));
+            if live { break; }
+            assert!(std::time::Instant::now() < reload_deadline, "filter never reloaded");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let v = w.version(&p);
+        std::fs::write(p.join("target.txt"), b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        w.poll();
+        assert_eq!(w.version(&p), v, "file ignored by the current .gitignore must not bump");
+
+        std::fs::write(p.join(".gitignore"), "\n").unwrap();
+        wait_for_version_bump(&mut w, &p, v);
+
+        let v2 = w.version(&p);
+        std::fs::write(p.join("target.txt"), b"y").unwrap();
+        wait_for_version_bump(&mut w, &p, v2);
+    }
+
+    #[test]
+    fn gitignore_self_ignore_still_bumps_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("repo");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join(".gitignore"), "").unwrap();
+        let mut w = WatcherState::new();
+        w.ensure(&p);
+
+        let v_start = w.version(&p);
+        std::fs::write(p.join(".gitignore"), "*\n").unwrap();
+        wait_for_version_bump(&mut w, &p, v_start);
+
+        let live = w.entries[0].ignore.as_ref().is_some_and(|ig| ig.rules.iter().any(|r| r.parts == ["*"]));
+        assert!(live, "the `*` rule must be live even though it ignores .gitignore itself");
     }
 }

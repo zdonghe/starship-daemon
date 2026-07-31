@@ -19,12 +19,12 @@ pub fn load_gitignore(repo_root: &Path) -> Option<GitignoreFilter> {
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
-        let negate = line.starts_with('!');
-        let trimmed = if negate { &line[1..] } else { line };
-        let anchored = trimmed.starts_with('/');
-        let stripped = if anchored { &trimmed[1..] } else { trimmed };
-        let dir_only = stripped.ends_with('/');
-        let pattern = if dir_only { &stripped[..stripped.len()-1] } else { stripped };
+        let trimmed = line.strip_prefix('!').unwrap_or(line);
+        let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
+        let pattern = stripped.strip_suffix('/').unwrap_or(stripped);
+        let negate = line != trimmed;
+        let anchored = trimmed != stripped || (pattern.contains('/') && !pattern.starts_with("**/"));
+        let dir_only = stripped != pattern;
         if pattern.is_empty() { continue; }
         let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
         rules.push(Rule { parts, negate, dir_only, anchored });
@@ -56,8 +56,7 @@ pub fn is_ignored_str(ig: &GitignoreFilter, event_path: &str) -> bool {
     for rule in &ig.rules {
         if rule.dir_only { continue; }
         if path_match(&rule.parts, &path_comps, rule.anchored) {
-            if rule.negate { result = false; }
-            else { result = true; }
+            result = !rule.negate;
         }
     }
 
@@ -99,8 +98,10 @@ pub fn path_match(parts: &[String], path_comps: &[&str], anchored: bool) -> bool
         }
         if parts[pi] == "**" {
             let remaining = parts.len() - pi - 1;
+            let is_trailing = remaining == 0;
+            let min_consume = if is_trailing && parts.len() > 1 { 1 } else { 0 };
             let max = comps.len().saturating_sub(remaining);
-            for end in ci..=max {
+            for end in (ci + min_consume)..=max {
                 if match_inner(pi + 1, end, parts, comps) {
                     return true;
                 }
@@ -115,12 +116,16 @@ pub fn path_match(parts: &[String], path_comps: &[&str], anchored: bool) -> bool
     }
 
     if has_ds {
-        for start in 0..=path_comps.len() {
-            if match_inner(0, start, parts, path_comps) {
-                return true;
+        if anchored {
+            match_inner(0, 0, parts, path_comps)
+        } else {
+            for start in 0..=path_comps.len() {
+                if match_inner(0, start, parts, path_comps) {
+                    return true;
+                }
             }
+            false
         }
-        false
     } else if parts.len() == 1 {
         if anchored {
             path_comps.first().map_or(false, |c| component_match(&parts[0], c))
@@ -245,12 +250,12 @@ mod tests {
 
     #[test]
     fn path_match_doublestar_cross_component() {
-        let r = mkrule("a/**/b", false, false);
-        assert!(path_match(&r.parts, &["a", "b"], false));
-        assert!(path_match(&r.parts, &["a", "x", "b"], false));
-        assert!(path_match(&r.parts, &["a", "x", "y", "b"], false));
-        assert!(!path_match(&r.parts, &["a", "x"], false));
-        assert!(path_match(&r.parts, &["x", "a", "b"], false));
+        let r = mkrule("a/**/b", false, true);
+        assert!(path_match(&r.parts, &["a", "b"], true));
+        assert!(path_match(&r.parts, &["a", "x", "b"], true));
+        assert!(path_match(&r.parts, &["a", "x", "y", "b"], true));
+        assert!(!path_match(&r.parts, &["a", "x"], true));
+        assert!(!path_match(&r.parts, &["x", "a", "b"], true));
     }
 
     #[test]
@@ -263,10 +268,20 @@ mod tests {
 
     #[test]
     fn path_match_doublestar_suffix() {
-        let r = mkrule("build/**", false, false);
-        assert!(path_match(&r.parts, &["build"], false));
-        assert!(path_match(&r.parts, &["build", "foo.o"], false));
-        assert!(path_match(&r.parts, &["build", "sub", "foo.o"], false));
+        let r = mkrule("build/**", false, true);
+        assert!(!path_match(&r.parts, &["build"], true), "build/** must not match bare build");
+        assert!(path_match(&r.parts, &["build", "foo.o"], true));
+        assert!(path_match(&r.parts, &["build", "sub", "foo.o"], true));
+        assert!(!path_match(&r.parts, &["x", "build", "foo.o"], true));
+    }
+
+    #[test]
+    fn path_match_trailing_doublestar_requires_directory_context() {
+        let r = mkrule("a/**", false, true);
+        assert!(!path_match(&r.parts, &["a"], true), "a/** must not match bare a");
+        assert!(path_match(&r.parts, &["a", "f"], true));
+        assert!(path_match(&r.parts, &["a", "x", "f"], true));
+        assert!(!path_match(&r.parts, &["x", "a", "f"], true));
     }
 
     #[test]
@@ -331,6 +346,53 @@ mod tests {
             b"*.o \nbuild  \n").unwrap();
         let ig = load_gitignore(dir.path()).unwrap();
         assert_eq!(ig.rules.len(), 2);
+    }
+
+    #[test]
+    fn doublestar_middle_slash_is_anchored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), b"a/**/b\n").unwrap();
+        let ig = load_gitignore(dir.path()).unwrap();
+        assert!(ig.rules[0].anchored, "a/**/b has a middle slash, must be anchored");
+        assert!(is_ignored_path(&ig, "a/b"));
+        assert!(is_ignored_path(&ig, "a/x/b"));
+        assert!(is_ignored_path(&ig, "a/x/y/b"));
+        assert!(!is_ignored_path(&ig, "x/a/b"), "anchored a/**/b must not match x/a/b");
+    }
+
+    #[test]
+    fn doublestar_prefix_is_unanchored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), b"**/build\n").unwrap();
+        let ig = load_gitignore(dir.path()).unwrap();
+        assert!(!ig.rules[0].anchored, "**/build matches at any level");
+        assert!(is_ignored_path(&ig, "build"));
+        assert!(is_ignored_path(&ig, "x/build"));
+        assert!(is_ignored_path(&ig, "x/y/build"));
+    }
+
+    #[test]
+    fn doublestar_suffix_is_anchored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), b"build/**\n").unwrap();
+        let ig = load_gitignore(dir.path()).unwrap();
+        assert!(ig.rules[0].anchored, "build/** has a middle slash, must be anchored");
+        assert!(!is_ignored_path(&ig, "build"), "build/** must not ignore bare build");
+        assert!(is_ignored_path(&ig, "build/foo.o"));
+        assert!(!is_ignored_path(&ig, "x/build"), "anchored build/** must not match x/build");
+        assert!(!is_ignored_path(&ig, "x/build/foo.o"));
+    }
+
+    #[test]
+    fn doublestar_prefix_multi_segment_is_unanchored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), b"**/foo/bar\n").unwrap();
+        let ig = load_gitignore(dir.path()).unwrap();
+        assert!(!ig.rules[0].anchored, "**/foo/bar matches at any level");
+        assert!(is_ignored_path(&ig, "foo/bar"));
+        assert!(is_ignored_path(&ig, "x/foo/bar"));
+        assert!(is_ignored_path(&ig, "x/y/foo/bar"));
+        assert!(!is_ignored_path(&ig, "foo/baz"));
     }
 
     #[test]

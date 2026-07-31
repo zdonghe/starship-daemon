@@ -5,31 +5,32 @@ use std::time::Instant;
 use lru::LruCache;
 use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::find_git_dir;
+use toml::Table;
 
-/// Cold render to force starship's internal cache population
-fn render_cold(cwd: &PathBuf) -> String {
+fn render_cold(cwd: &PathBuf, config: &Table) -> String {
     let ctx = RenderContext {
         cwd: cwd.clone(),
         terminal_width: 120,
         status_code: 0,
         keymap: "viins".to_string(),
     };
-    cache::render_prompt(&ctx, None)
+    cache::render_prompt_with_config(&ctx, None, config)
 }
 
 fn main() {
     let cwd = std::env::current_dir().unwrap();
     let config_path = cache::default_config_path();
-    let config = cache::load_config(&config_path).unwrap();
+    let config_path = cache::load_config(&config_path).unwrap();
+    let config = cache::read_config(&config_path);
 
     println!("=== starship-daemon hot-path benchmarks ===\n");
     println!("cwd:        {:?}", cwd);
-    println!("config:     {:?}", config);
+    println!("config:     {:?}", config_path);
 
     let gd = find_git_dir(&cwd);
     println!("git_dir:    {:?}\n", gd);
 
-    let _ = render_cold(&cwd);
+    let _ = render_cold(&cwd, &config);
     println!("(warm-up render done)\n");
 
     // ---------- cache hit: LruCache::get ----------
@@ -77,12 +78,12 @@ fn main() {
             keymap: "viins".to_string(),
         };
         let start = Instant::now();
-        let _ = cache::render_prompt(&ctx, None);
+        let _ = cache::render_prompt_with_config(&ctx, None, &config);
         let elapsed = start.elapsed().as_nanos() as f64 / 1_000_000.0;
         if i >= 1 { total += elapsed; } // skip first (filesystem cold cache)
     }
     let avg_ms = total / ((n - 1) as f64);
-    println!("  render_prompt full:                  {:>8.1} ms", avg_ms);
+    println!("  render_prompt_with_config full:      {:>8.1} ms", avg_ms);
 
     println!("\n--- summary ---");
     println!("  cache hit (key + lookup):             {:>8.1} us", key_us + hit_ns / 1000.0);

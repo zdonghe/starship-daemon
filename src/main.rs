@@ -230,11 +230,14 @@ fn process_request(s: &mut Session, config_path: &mut PathBuf, cached_config: &m
     }
 
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
-    if let Some(r) = repo_root { watcher.ensure(r); }
-    watcher.poll();
-    watcher.process_dirty();
-    let watcher_gen = repo_root.map_or(0, |r| watcher.generation(r));
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, watcher_gen);
+    let watcher_version = if let Some(r) = repo_root {
+        watcher.ensure(r);
+        watcher.flush();
+        watcher.version(r)
+    } else {
+        0
+    };
+    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, watcher_version);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);
@@ -281,7 +284,7 @@ fn main() {
     }
 
     let mut watcher = WatcherState::new();
-    let mut handles = Vec::with_capacity(MAX_SESSIONS + watcher.entries.len());
+    let mut handles = Vec::with_capacity(MAX_SESSIONS + watcher.num_entries());
 
     loop {
         let now = Instant::now();
@@ -291,7 +294,7 @@ fn main() {
             }
         }
         for s in &sessions { handles.push(s.event); }
-        for w in &watcher.entries { handles.push(w.change_event); }
+        handles.extend(watcher.change_events());
         let timeout: DWORD = 1000;
         let total = handles.len() as DWORD;
         let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, timeout) };
@@ -312,8 +315,6 @@ fn main() {
                 let w_idx = idx - sessions.len();
                 watcher.handle_event(w_idx);
             }
-        } else if rc == ffi::WAIT_TIMEOUT {
-            watcher.process_dirty();
         }
         handles.clear();
     }

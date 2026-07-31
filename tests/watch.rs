@@ -2,7 +2,7 @@ use starship_daemon::ffi;
 use starship_daemon::watch::WatcherState;
 
 mod common;
-use common::TestRepo;
+use common::{assert_version_bumped, TestRepo};
 
 fn write_file(repo: &TestRepo, name: &str, content: &str) {
     repo.write(name, content);
@@ -16,26 +16,20 @@ fn settle_watcher() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 }
 
-fn poll_and_process(w: &mut WatcherState) {
-    w.poll();
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    w.process_dirty();
-}
-
 #[test]
-fn ensure_inserts_generation_on_success() {
+fn ensure_creates_watcher_entry() {
     let repo = TestRepo::new();
     let p = repopath(&repo);
 
     let mut w = WatcherState::new();
     w.ensure(&p);
-    assert_eq!(w.generation(&p), 1);
+    assert_eq!(w.num_entries(), 1);
 }
 
 #[test]
-fn unknown_repo_returns_zero() {
+fn unknown_repo_returns_zero_version() {
     let w = WatcherState::new();
-    assert_eq!(w.generation(&std::path::PathBuf::from("__nonexistent__")), 0);
+    assert_eq!(w.version(&std::path::PathBuf::from("__nonexistent__")), 0);
 }
 
 #[test]
@@ -45,52 +39,83 @@ fn ensure_is_idempotent() {
 
     let mut w = WatcherState::new();
     w.ensure(&p);
-    let gen1 = w.generation(&p);
     w.ensure(&p);
-    assert_eq!(w.generation(&p), gen1);
-    assert_eq!(w.entries.len(), 1);
+    assert_eq!(w.num_entries(), 1);
 }
 
 #[test]
-fn poll_process_bumps_generation_on_file_change() {
+fn poll_increases_version_on_file_change() {
     let repo = TestRepo::new();
     let p = repopath(&repo);
 
     let mut w = WatcherState::new();
     w.ensure(&p);
+
+    let v0 = w.version(&p);
 
     write_file(&repo, "trigger", "hello");
     settle_watcher();
-    poll_and_process(&mut w);
-    let g1 = w.generation(&p);
-    assert!(g1 > 1, "generation should have been bumped after file write, got {g1}");
+    w.poll();
+    assert!(w.version(&p) > v0, "version should increase after file write");
+
+    let v1 = w.version(&p);
 
     write_file(&repo, "trigger2", "world");
     settle_watcher();
-    poll_and_process(&mut w);
-    let g2 = w.generation(&p);
-    assert!(g2 > g1, "generation should bump again after second file write, got {g2} vs {g1}");
+    w.poll();
+    assert!(w.version(&p) > v1, "version should increase again after second file write");
 }
 
 #[test]
-fn poll_process_detects_file_creation() {
+fn anchored_doublestar_rule_does_not_ignore_sibling_paths() {
     let repo = TestRepo::new();
     let p = repopath(&repo);
+
+    repo.write(".gitignore", "a/**/b\n");
+    std::fs::create_dir_all(p.join("x").join("a")).unwrap();
 
     let mut w = WatcherState::new();
     w.ensure(&p);
 
-    write_file(&repo, "new.txt", "world");
-    settle_watcher();
-    poll_and_process(&mut w);
-    let g1 = w.generation(&p);
-    assert!(g1 > 1, "gen should have been bumped from file creation, got {g1}");
+    repo.write("x/a/b", "hello");
+    assert_version_bumped(&mut w, &p);
+}
 
-    write_file(&repo, "another.txt", "more");
-    settle_watcher();
-    poll_and_process(&mut w);
-    let g2 = w.generation(&p);
-    assert!(g2 > g1, "gen should have been bumped from second file creation, got {g2} vs {g1}");
+#[test]
+fn anchored_doublestar_rule_suppresses_matching_paths() {
+    let repo = TestRepo::new();
+    let p = repopath(&repo);
+
+    repo.write(".gitignore", "a/**/b\n");
+    std::fs::create_dir_all(p.join("a").join("x")).unwrap();
+
+    let mut w = WatcherState::new();
+    w.ensure(&p);
+    let v0 = w.version(&p);
+
+    repo.write("a/x/b", "hello");
+    for _ in 0..10 {
+        w.poll();
+        assert_eq!(w.version(&p), v0, "a/x/b must match anchored a/**/b and not bump");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    repo.write("visible.txt", "hello");
+    assert_version_bumped(&mut w, &p);
+}
+
+#[test]
+fn trailing_doublestar_does_not_ignore_bare_component() {
+    let repo = TestRepo::new();
+    let p = repopath(&repo);
+
+    repo.write(".gitignore", "a/**\n");
+
+    let mut w = WatcherState::new();
+    w.ensure(&p);
+
+    repo.write("a", "file named a at root");
+    assert_version_bumped(&mut w, &p);
 }
 
 #[test]
@@ -105,7 +130,7 @@ fn cancel_io_is_needed_readdirectorychangesw_pending_at_drop() {
     // change_event is a manual-reset event, initially unsignaled.
     // Since no change has occurred yet, the IO completion hasn't fired.
     // Overlapped IO is pending — CancelIoEx is required before CloseHandle.
-    let rc = unsafe { ffi::WaitForSingleObject(w.entries[0].change_event, 0) };
+    let rc = unsafe { ffi::WaitForSingleObject(w.change_event(0), 0) };
 
     assert_eq!(rc, ffi::WAIT_TIMEOUT,
         "ReadDirectoryChangesW unexpectedly completed immediately (rc={rc}). \

@@ -5,10 +5,12 @@ use std::time::{Duration, Instant};
 
 use starship_daemon::ffi;
 
+const PIPE_PATH: &str = r"\\.\pipe\starship-daemon";
+
 fn pipe_path() -> String {
     std::env::var("STARSHIP_DAEMON_PIPE")
         .map(|n| { if n.starts_with(r"\\.\pipe\") { n } else { format!(r"\\.\pipe\{n}") } })
-        .unwrap_or_else(|_| starship_daemon::PIPE_NAME.to_string())
+        .unwrap_or_else(|_| PIPE_PATH.to_string())
 }
 
 static DAEMON_LOCK: Mutex<()> = Mutex::new(());
@@ -19,12 +21,11 @@ struct PipeClient {
 
 impl PipeClient {
     fn connect(timeout_ms: u32) -> Option<Self> {
-        let path = pipe_path();
         let deadline = Instant::now()
             + std::time::Duration::from_millis(timeout_ms as u64);
         loop {
             unsafe {
-                let wide = ffi::to_wide(&path);
+                let wide = ffi::to_wide(&pipe_path());
                 let handle = ffi::CreateFileW(
                     wide.as_ptr(),
                     0xC0000000,
@@ -106,12 +107,10 @@ struct DaemonProcess {
 }
 
 impl DaemonProcess {
-    fn start() -> Self {
+    fn with_config(config_toml: &str) -> Self {
         let config_dir = tempfile::TempDir::new().unwrap();
         let config_path = config_dir.path().join("starship.toml");
-        std::fs::write(&config_path,
-            b"format = \"$character\"\nadd_newline = false\n[character]\nformat = \">\"\n"
-        ).unwrap();
+        std::fs::write(&config_path, config_toml.as_bytes()).unwrap();
 
         let daemon_exe = std::env::var("CARGO_BIN_EXE_starship-daemon")
             .unwrap_or_else(|_| {
@@ -154,12 +153,12 @@ impl Drop for DaemonProcess {
     }
 }
 
-fn with_daemon<F>(f: F)
+fn with_daemon_config<F>(config_toml: &str, f: F)
 where
     F: FnOnce() + std::panic::UnwindSafe,
 {
     let lock = DAEMON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let daemon = DaemonProcess::start();
+    let daemon = DaemonProcess::with_config(config_toml);
     let result = std::panic::catch_unwind(f);
     drop(daemon);
     drop(lock);
@@ -168,14 +167,14 @@ where
     }
 }
 
-#[test]
-fn ipc_connection() {
-    with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect to daemon");
-        assert!(c.send_request(".", "{}"));
-        let resp = c.read_response().expect("read response");
-        assert!(!resp.is_empty(), "response should be non-empty");
-    });
+fn with_daemon<F>(f: F)
+where
+    F: FnOnce() + std::panic::UnwindSafe,
+{
+    with_daemon_config(
+        "format = \"$character\"\nadd_newline = false\n[character]\nformat = \">\"\n",
+        f,
+    );
 }
 
 fn check_response(resp: &str) {
@@ -251,12 +250,24 @@ fn ipc_mid_request_disconnect() {
 
 #[test]
 fn ipc_custom_status_code() {
-    with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect");
-        assert!(c.send_request(".", r#"{"status_code":1}"#));
-        let resp = c.read_response().expect("response");
-        check_response(&resp);
-    });
+    with_daemon_config(
+        "format = \"$status\"\nadd_newline = false\n\
+         [status]\ndisabled = false\nsuccess_symbol = \"OK\"\nsymbol = \"FAIL\"\n",
+        || {
+            let c = PipeClient::connect(1000).expect("connect");
+            assert!(c.send_request(".", r#"{"status_code":0}"#));
+            let resp0 = c.read_response().expect("status 0 response");
+            assert!(resp0.contains("OK"),
+                "status 0 prompt should contain OK symbol, got: {resp0:?}");
+
+            let c = PipeClient::connect(1000).expect("reconnect");
+            assert!(c.send_request(".", r#"{"status_code":1}"#));
+            let resp1 = c.read_response().expect("status 1 response");
+            assert_ne!(resp0, resp1, "different status codes must give different prompts");
+            assert!(resp1.contains("FAIL"),
+                "status 1 prompt should contain the FAIL symbol, got: {resp1:?}");
+        },
+    );
 }
 
 #[test]
@@ -268,9 +279,6 @@ fn ipc_disable_cache() {
         check_response(&resp);
     });
 }
-
-mod common;
-use std::path::Path;
 
 #[test]
 fn ipc_sync_drop_race() {
@@ -315,6 +323,9 @@ fn ipc_sync_drop_race() {
     });
 }
 
+mod common;
+use std::path::Path;
+
 #[test]
 fn ipc_git_push_stale_ahead() {
     let bare_dir = tempfile::TempDir::new().unwrap();
@@ -343,68 +354,36 @@ fn ipc_git_push_stale_ahead() {
 
     let repo_str = repo_path.to_str().unwrap().to_string();
 
-    let config_dir = tempfile::TempDir::new().unwrap();
-    let config_path = config_dir.path().join("starship.toml");
-    std::fs::write(&config_path,
-        b"format = \"$git_status\"\nadd_newline = false\n[git_status]\nformat = \"$ahead_behind\"\n"
-    ).unwrap();
-
-    let lock = DAEMON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    let daemon_exe = std::env::var("CARGO_BIN_EXE_starship-daemon")
-        .unwrap_or_else(|_| {
-            let mut p = std::env::current_exe().unwrap();
-            p.pop(); p.pop();
-            p.push("starship-daemon.exe");
-            p.display().to_string()
-        });
-
-    let mut process = std::process::Command::new(&daemon_exe)
-        .env("STARSHIP_CONFIG", &config_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to spawn daemon");
-
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(c) = PipeClient::connect(100) {
-            drop(c);
-            break;
-        }
-        if Instant::now() > deadline {
-            let _ = process.kill(); let _ = process.wait();
-            panic!("daemon did not become ready within 10s");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    let result = std::panic::catch_unwind(|| {
-        let c = PipeClient::connect(1000).expect("connect");
-        assert!(c.send_request(&repo_str, "{}"));
-        let before_push = c.read_response().expect("before push");
-        assert!(before_push.contains('⇡'),
-            "prompt should show ahead indicator before push, got: {before_push:?}");
-
-        common::git(Path::new(&repo_str), &["push"]);
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let c = PipeClient::connect(1000).expect("connect after push");
+    with_daemon_config(
+        "format = \"$git_status\"\nadd_newline = false\n[git_status]\nformat = \"$ahead_behind\"\n",
+        || {
+            let c = PipeClient::connect(1000).expect("connect");
             assert!(c.send_request(&repo_str, "{}"));
-            let resp = c.read_response().expect("read after push");
-            if !resp.contains('⇡') {
-                break;
-            }
-            if Instant::now() > deadline {
-                panic!("⇡ never cleared within 5s after push (watcher cooldown race)");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-    });
+            let before_push = c.read_response().expect("before push");
+            assert!(before_push.contains('⇡'),
+                "prompt should show ahead indicator before push, got: {before_push:?}");
 
-    let _ = process.kill();
-    let _ = process.wait();
-    drop(lock);
-    if let Err(e) = result { std::panic::resume_unwind(e); }
+            common::git(Path::new(&repo_str), &["push"]);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut after_push = None;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+                if let Some(c2) = PipeClient::connect(500) {
+                    if c2.send_request(&repo_str, "{}") {
+                        if let Some(resp) = c2.read_response() {
+                            if !resp.contains('⇡') {
+                                after_push = Some(resp);
+                                break;
+                            }
+                            after_push = Some(resp);
+                        }
+                    }
+                }
+            }
+            let after_push = after_push.expect("after push (no response within 5s)");
+            assert!(!after_push.contains('⇡'),
+                "prompt should NOT contain ⇡ after push (no longer ahead)");
+        },
+    );
 }

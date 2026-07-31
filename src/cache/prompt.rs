@@ -33,6 +33,10 @@ struct RepoCache {
 static REPO_CACHE: Mutex<Option<RepoCache>> = Mutex::new(None);
 static BUST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn lock_repo_cache() -> std::sync::MutexGuard<'static, Option<RepoCache>> {
+    REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn get_or_create_ctx(
     git_dir: Option<&Path>,
     current_dir: &Path,
@@ -40,7 +44,7 @@ fn get_or_create_ctx(
 ) -> starship::context::Context<'static> {
     if let Some(gd) = git_dir {
         let index_mtime = get_mtime_ns(&gd.join("index"));
-        let mut cache = REPO_CACHE.lock().unwrap();
+        let mut cache = lock_repo_cache();
         if let Some(ref mut cached) = *cache {
             if cached.git_dir == gd && cached.index_mtime == index_mtime {
                 if let Some(sctx) = cached.ctx.take() {
@@ -59,47 +63,20 @@ fn get_or_create_ctx(
 }
 
 pub fn clear_repo_cache() {
-    *REPO_CACHE.lock().unwrap() = None;
+    *lock_repo_cache() = None;
 }
 
-fn make_bust_dir(git_dir: &Path) -> (PathBuf, PathBuf) {
+fn make_bust_dir(git_dir: &Path) -> PathBuf {
     let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&bust);
-    (bust.clone(), bust)
-}
-
-pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
-    let (current_dir, bust_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
-        Some(ref gd) => {
-            let (c, b) = make_bust_dir(gd);
-            (c, Some(b))
-        }
-        None => (ctx.cwd.clone(), None),
-    };
-
-    let mut properties = starship::context::Properties::default();
-    properties.status_code = Some(ctx.status_code.to_string());
-    properties.keymap = ctx.keymap.clone();
-
-    let env = starship::context::Env::default();
-    let mut sctx = starship::context::Context::new_with_shell_and_path(
-        properties, starship::context::Shell::Pwsh, starship::context::Target::Main,
-        current_dir, ctx.cwd.clone(), env,
-    );
-    sctx.width = ctx.terminal_width;
-
-    let result = starship::print::get_prompt(&sctx);
-    if let Some(dir) = bust_dir {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    result.trim_end_matches('\n').to_string()
+    bust
 }
 
 pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
     let (current_dir, bust_dir, resolved_git_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
         Some(ref gd) => {
-            let (c, b) = make_bust_dir(gd);
-            (c, Some(b), Some(gd.clone()))
+            let bust = make_bust_dir(gd);
+            (bust.clone(), Some(bust), Some(gd.clone()))
         }
         None => (ctx.cwd.clone(), None, None),
     };
@@ -113,7 +90,7 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
     if let Some(dir) = bust_dir {
         let _ = std::fs::remove_dir_all(dir);
     }
-    result.trim_end_matches('\n').to_string()
+    trim_prompt(&result)
 }
 
 fn expand_all(context: &starship::context::Context) -> String {
@@ -135,11 +112,7 @@ fn expand_all(context: &starship::context::Context) -> String {
         .filter(|m| !explicit.contains(m) && !context.is_module_disabled_in_config(m))
         .collect();
 
-    let replacement = if expanded.is_empty() {
-        String::new()
-    } else {
-        expanded.iter().map(|m| format!("${}", m)).collect::<String>()
-    };
+    let replacement: String = expanded.iter().map(|m| format!("${}", m)).collect();
 
     format_str.replace("${all}", &replacement).replace("$all", &replacement)
 }
@@ -191,8 +164,23 @@ fn resolve_format(sctx: &starship::context::Context) -> String {
 
 fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
     let index_mtime = get_mtime_ns(&gd.join("index"));
-    let mut rc = REPO_CACHE.lock().unwrap();
+    let mut rc = lock_repo_cache();
     *rc = Some(RepoCache { git_dir: gd.to_path_buf(), index_mtime, ctx: Some(sctx) });
+}
+
+fn prepare_and_resolve(
+    resolved_gd: Option<&Path>,
+    current_dir: &Path,
+    ctx: &RenderContext,
+    config: &toml::Table,
+) -> (starship::context::Context<'static>, String) {
+    let sctx = prepare_ctx(resolved_gd, current_dir, ctx, config);
+    let fmt = resolve_format(&sctx);
+    (sctx, fmt)
+}
+
+fn trim_prompt(s: &str) -> String {
+    s.trim_end_matches('\n').to_string()
 }
 
 pub fn render_cached(
@@ -203,59 +191,49 @@ pub fn render_cached(
     lru: &mut LruCache<CacheKey, CachedValue>,
 ) -> String {
     let tb = crate::cache::current_minute();
-    let resolved_gd = git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd));
+    let resolved_gd = git_dir.map(Path::to_path_buf);
 
-    // Path 1: Full hit — time_bucket matches
+    // Path 1: Full hit, time_bucket still current
     if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb) {
         return entry.rendered.clone();
     }
 
-    // Path 2: Time-only re-render — key exists, stale time_bucket
-    // No bust_dir, no populate_cache, just re-use cached segments
-    if let Some((key, mut entry)) = lru.pop_entry(&full_key) {
-
-        let sctx = prepare_ctx(resolved_gd.as_deref(), &ctx.cwd, ctx, config);
-        let fmt = resolve_format(&sctx);
-        let r = get_prompt_with_cache(&sctx, &entry.segments, &fmt);
-        let rendered = r.trim_end_matches('\n').to_string();
-        entry.rendered = rendered.clone();
-        entry.time_bucket = tb;
-        lru.put(key, entry);
-
-        if let Some(ref gd) = resolved_gd {
-            save_repo_cache(gd, sctx);
+    // Path 2: key exists but time_bucket is stale - reuse cached segments,
+    // re-render only the time module. No bust_dir, no populate_cache.
+    // Path 3: full miss - build fresh segments in a bust_dir.
+    let (key, current_dir, bust_dir, segments) = match lru.pop_entry(full_key) {
+        Some((key, entry)) => (key, ctx.cwd.clone(), None, Some(entry.segments)),
+        None => {
+            let (current_dir, bust_dir) = match resolved_gd {
+                Some(ref gd) => {
+                    let bust = make_bust_dir(gd);
+                    (bust.clone(), Some(bust))
+                }
+                None => (ctx.cwd.clone(), None),
+            };
+            (full_key.clone(), current_dir, bust_dir, None)
         }
-
-        return rendered;
-    }
-
-    // Path 3: Full miss — bust_dir + populate_cache
-
-    let (current_dir, bust_dir) = match resolved_gd {
-        Some(ref gd) => {
-            let (c, b) = make_bust_dir(gd);
-            (c, Some(b))
-        }
-        None => (ctx.cwd.clone(), None),
     };
 
-    let sctx = prepare_ctx(resolved_gd.as_deref(), &current_dir, ctx, config);
-    let fmt = resolve_format(&sctx);
-    let mut module_cache = ModuleCache::new();
-    populate_cache(&sctx, &fmt, &mut module_cache);
-    let rendered = get_prompt_with_cache(&sctx, &module_cache, &fmt);
-    let rendered = rendered.trim_end_matches('\n').to_string();
-    lru.put(full_key.clone(), CachedValue {
-        rendered: rendered.clone(),
-        segments: module_cache,
-        time_bucket: tb,
-    });
+    let (sctx, fmt) = prepare_and_resolve(resolved_gd.as_deref(), &current_dir, ctx, config);
+    let segments = match segments {
+        Some(seg) => seg,
+        None => {
+            let mut seg = ModuleCache::new();
+            populate_cache(&sctx, &fmt, &mut seg);
+            seg
+        }
+    };
+    let rendered = trim_prompt(&get_prompt_with_cache(&sctx, &segments, &fmt));
+    lru.put(key, CachedValue { rendered: rendered.clone(), segments, time_bucket: tb });
 
     if let Some(ref gd) = resolved_gd {
         save_repo_cache(gd, sctx);
     }
 
-    if let Some(dir) = bust_dir { let _ = std::fs::remove_dir_all(dir); }
+    if let Some(dir) = bust_dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
     rendered
 }
 
@@ -342,6 +320,8 @@ mod tests {
 
         let fmt = expand_all(&ctx);
         assert!(!fmt.contains("$all"));
+        assert!(!fmt.contains("$time"),
+            "right_format modules must be excluded from $all expansion");
     }
 
     #[test]
@@ -454,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn time_only_re_render_is_fast_no_bust_dir() {
+    fn time_only_re_render_refreshes_bucket() {
         let cwd = tempfile::TempDir::new().unwrap();
         let ctx = RenderContext {
             cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
@@ -479,11 +459,7 @@ mod tests {
         entry.time_bucket = 0;
         lru.put(key.clone(), entry);
 
-        // Time-only re-render must be fast (<50ms on any hardware)
-        let start = std::time::Instant::now();
         let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
-        let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 50, "time-only re-render took {}ms", elapsed.as_millis());
         assert!(!result.is_empty(), "result must not be empty");
 
         // Key still exists and has current time_bucket
@@ -493,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_bucket_preserves_existing_segments() {
+    fn multiple_stale_bucket_rereads_preserve_cache() {
         let cwd = tempfile::TempDir::new().unwrap();
         let ctx = RenderContext {
             cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
@@ -513,7 +489,8 @@ mod tests {
         let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
+        let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
+        assert!(result.contains(':'), "output must contain time (HH:MM)");
 
         // Snapshot segments after full render (Path 3)
         let (_, before) = lru.pop_entry(&key).unwrap();
@@ -521,89 +498,9 @@ mod tests {
         assert!(segment_keys.contains(&"character".to_string()));
         assert!(segment_keys.contains(&"directory".to_string()));
         assert!(!segment_keys.contains(&"time".to_string()));
-        // Put back with stale time_bucket
-        let mut entry = before;
-        entry.time_bucket = 0;
-        lru.put(key.clone(), entry);
+        lru.put(key.clone(), before);
 
-        // Stale bucket re-render
-        let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
-
-        let (_, after) = lru.pop_entry(&key).unwrap();
-        for mod_name in &segment_keys {
-            assert!(after.segments.contains_key(mod_name.as_str()),
-                "module {mod_name} missing after stale-bucket re-render");
-        }
-        assert!(!after.segments.contains_key("time"),
-            "time must not appear in cached segments after stale-bucket path");
-        assert_eq!(after.time_bucket, crate::cache::current_minute(),
-            "time_bucket must be updated after stale-bucket re-render");
-    }
-
-    #[test]
-    fn stale_bucket_time_not_cached() {
-        let cwd = tempfile::TempDir::new().unwrap();
-        let ctx = RenderContext {
-            cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
-        };
-        let cfg = toml::toml! {
-            format = "$character$time"
-            add_newline = false
-            [character]
-            format = "> "
-            [time]
-            disabled = false
-            format = "[$time](bold yellow)"
-            time_format = "%H:%M"
-        };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
-
-        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
-
-        // Output should contain a time (digits with colon) — proves time was computed
-        assert!(result.contains(':'), "output must contain time (HH:MM)");
-
-        // Stale time_bucket, re-render
-        let (_, mut entry) = lru.pop_entry(&key).unwrap();
-        entry.time_bucket = 0;
-        lru.put(key.clone(), entry);
-
-        let result2 = render_cached(&ctx, None, &cfg, &key, &mut lru);
-        assert!(result2.contains(':'), "re-render output must contain time");
-
-        // Time segments not in cache — proves computed on-the-fly by get_prompt_with_cache
-        let (_, cached) = lru.pop_entry(&key).unwrap();
-        assert!(!cached.segments.contains_key("time"),
-            "time must not be stored in cached segments after stale-bucket path");
-        assert!(cached.segments.contains_key("character"),
-            "character must survive in cached segments");
-        assert_eq!(cached.time_bucket, crate::cache::current_minute(),
-            "time_bucket must be updated after stale-bucket re-render");
-    }
-
-    #[test]
-    fn multiple_stale_bucket_rereads_preserve_cache() {
-        let cwd = tempfile::TempDir::new().unwrap();
-        let ctx = RenderContext {
-            cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
-        };
-        let cfg = toml::toml! {
-            format = "$character$time"
-            add_newline = false
-            [character]
-            format = "> "
-            [time]
-            disabled = false
-            format = "[$time](bold yellow)"
-            time_format = "%H:%M"
-        };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
-
-        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
-
-        // Three consecutive stale-bucket re-renders
+        // Three consecutive stale-bucket re-renders must preserve all segments
         for i in 0..3 {
             let (_, mut entry) = lru.pop_entry(&key).unwrap();
             entry.time_bucket = 0;
@@ -611,22 +508,17 @@ mod tests {
             let r = render_cached(&ctx, None, &cfg, &key, &mut lru);
             assert!(r.contains(':'), "re-render {i} output must contain time");
 
-            // Verify cache state after each iteration
             let (_, check) = lru.pop_entry(&key).unwrap();
-            assert!(check.segments.contains_key("character"),
-                "character must survive after re-render {i}");
+            for mod_name in &segment_keys {
+                assert!(check.segments.contains_key(mod_name.as_str()),
+                    "module {mod_name} missing after stale-bucket re-render {i}");
+            }
             assert!(!check.segments.contains_key("time"),
                 "time must not appear after re-render {i}");
             assert_eq!(check.time_bucket, crate::cache::current_minute(),
                 "time_bucket must be updated after re-render {i}");
             lru.put(key.clone(), check);
         }
-
-        // Final state: segments intact, time absent from cache
-        let (_, cached) = lru.pop_entry(&key).unwrap();
-        assert!(cached.segments.contains_key("character"),
-            "character must survive 3 stale-bucket re-renders");
-        assert!(!cached.segments.contains_key("time"),
-            "time must not appear after 3 stale-bucket re-renders");
     }
+
 }

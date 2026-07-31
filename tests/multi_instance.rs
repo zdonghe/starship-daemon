@@ -39,19 +39,14 @@ impl MultiRepoHarness {
         for _ in 0..2 {
             thread::sleep(Duration::from_millis(300));
             self.watcher.poll();
-            thread::sleep(Duration::from_millis(150));
-            self.watcher.process_dirty();
         }
     }
 
     fn render_repo(&mut self, repo_path: &Path) -> String {
+        self.settle_and_poll();
         let gd = starship_daemon::find_git_dir(repo_path);
-        let gen_val = self.watcher.generation(repo_path);
-        let key = cache::compute_cache_key(
-            repo_path, 0, "vi", 120,
-            0,
-            gen_val,
-        );
+        let v = self.watcher.version(repo_path);
+        let key = cache::compute_cache_key(repo_path, 0, "vi", 120, 0, v);
         let ctx = RenderContext {
             cwd: repo_path.to_path_buf(),
             terminal_width: 120, status_code: 0,
@@ -62,9 +57,6 @@ impl MultiRepoHarness {
 
     fn render_a(&mut self) -> String { let p = self.a.path().to_path_buf(); self.render_repo(&p) }
     fn render_b(&mut self) -> String { let p = self.b.path().to_path_buf(); self.render_repo(&p) }
-
-    fn gen_a(&self) -> u64 { self.watcher.generation(self.a.path()) }
-    fn gen_b(&self) -> u64 { self.watcher.generation(self.b.path()) }
     fn write_a(&self, name: &str, content: &str) { self.a.write(name, content); }
     fn write_b(&self, name: &str, content: &str) { self.b.write(name, content); }
     fn remove_a(&self, name: &str) { self.a.remove(name); }
@@ -72,35 +64,27 @@ impl MultiRepoHarness {
 }
 
 // ============================================================
-// Watcher gen isolation
+// Version bump isolation
 // ============================================================
 
 #[test]
-fn gen_isolation() {
+fn version_isolation() {
     let mut h = MultiRepoHarness::new();
-    let g0a = h.gen_a();
-    let g0b = h.gen_b();
+
+    let v_a_before = h.watcher.version(h.a.path());
+    let v_b_before = h.watcher.version(h.b.path());
 
     h.write_a("trigger_a", "change");
     h.settle_and_poll();
-    let g1a = h.gen_a();
-    let g1b = h.gen_b();
-    assert!(g1a > g0a, "A gen should bump from write to A (start={g0a}, now={g1a})");
-    assert!(g1b >= g0b, "B gen should not regress");
+    assert!(h.watcher.version(h.a.path()) > v_a_before, "A version should increase after write to A");
+    assert_eq!(h.watcher.version(h.b.path()), v_b_before, "B version unchanged");
+
+    let v_a_mid = h.watcher.version(h.a.path());
 
     h.write_b("trigger_b", "change");
     h.settle_and_poll();
-    let g2a = h.gen_a();
-    let g2b = h.gen_b();
-    assert!(g2b > g1b, "B gen should bump from write to B (start={g1b}, now={g2b})");
-    assert!(g2a >= g1a, "A gen should not regress");
-
-    h.write_a("trigger_a2", "another");
-    h.settle_and_poll();
-    let g3a = h.gen_a();
-    let g3b = h.gen_b();
-    assert!(g3a > g2a, "A gen should bump again from second write to A (start={g2a}, now={g3a})");
-    assert!(g3b >= g2b, "B gen should not regress");
+    assert!(h.watcher.version(h.b.path()) > v_b_before, "B version should increase after write to B");
+    assert_eq!(h.watcher.version(h.a.path()), v_a_mid, "A version unchanged");
 }
 
 // ============================================================

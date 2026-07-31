@@ -39,7 +39,7 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
     use std::sync::LazyLock;
     static CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(result) = cache.get(cwd) {
         return result.clone();
     }
@@ -122,10 +122,6 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ====================
-    // ClientProps::parse_json
-    // ====================
 
     #[test]
     fn parse_json_empty_object() {
@@ -252,10 +248,6 @@ mod tests {
         assert_eq!(p.terminal_width, Some(80));
         assert_eq!(p.disable_cache, Some(true));
     }
-
-    // ====================
-    // parse_request
-    // ====================
 
     fn encode_request(cwd: &str, props: &str) -> Vec<u8> {
         let cwd_b = cwd.as_bytes();

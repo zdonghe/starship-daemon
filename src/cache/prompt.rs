@@ -40,7 +40,7 @@ fn get_or_create_ctx(
 ) -> starship::context::Context<'static> {
     if let Some(gd) = git_dir {
         let index_mtime = get_mtime_ns(&gd.join("index"));
-        let mut cache = REPO_CACHE.lock().unwrap();
+        let mut cache = REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref mut cached) = *cache {
             if cached.git_dir == gd && cached.index_mtime == index_mtime {
                 if let Some(sctx) = cached.ctx.take() {
@@ -59,20 +59,20 @@ fn get_or_create_ctx(
 }
 
 pub fn clear_repo_cache() {
-    *REPO_CACHE.lock().unwrap() = None;
+    *REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
-fn make_bust_dir(git_dir: &Path) -> (PathBuf, PathBuf) {
+fn make_bust_dir(git_dir: &Path) -> PathBuf {
     let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&bust);
-    (bust.clone(), bust)
+    bust
 }
 
 pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
     let (current_dir, bust_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
         Some(ref gd) => {
-            let (c, b) = make_bust_dir(gd);
-            (c, Some(b))
+            let bust = make_bust_dir(gd);
+            (bust.clone(), Some(bust))
         }
         None => (ctx.cwd.clone(), None),
     };
@@ -98,8 +98,8 @@ pub fn render_prompt(ctx: &RenderContext, git_dir: Option<&Path>) -> String {
 pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
     let (current_dir, bust_dir, resolved_git_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
         Some(ref gd) => {
-            let (c, b) = make_bust_dir(gd);
-            (c, Some(b), Some(gd.clone()))
+            let bust = make_bust_dir(gd);
+            (bust.clone(), Some(bust), Some(gd.clone()))
         }
         None => (ctx.cwd.clone(), None, None),
     };
@@ -191,8 +191,19 @@ fn resolve_format(sctx: &starship::context::Context) -> String {
 
 fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
     let index_mtime = get_mtime_ns(&gd.join("index"));
-    let mut rc = REPO_CACHE.lock().unwrap();
+    let mut rc = REPO_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     *rc = Some(RepoCache { git_dir: gd.to_path_buf(), index_mtime, ctx: Some(sctx) });
+}
+
+fn prepare_and_resolve(
+    resolved_gd: Option<&Path>,
+    current_dir: &Path,
+    ctx: &RenderContext,
+    config: &toml::Table,
+) -> (starship::context::Context<'static>, String) {
+    let sctx = prepare_ctx(resolved_gd, current_dir, ctx, config);
+    let fmt = resolve_format(&sctx);
+    (sctx, fmt)
 }
 
 pub fn render_cached(
@@ -203,7 +214,7 @@ pub fn render_cached(
     lru: &mut LruCache<CacheKey, CachedValue>,
 ) -> String {
     let tb = crate::cache::current_minute();
-    let resolved_gd = git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd));
+    let resolved_gd = git_dir.map(Path::to_path_buf);
 
     // Path 1: Full hit — time_bucket matches
     if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb) {
@@ -214,8 +225,7 @@ pub fn render_cached(
     // No bust_dir, no populate_cache, just re-use cached segments
     if let Some((key, mut entry)) = lru.pop_entry(&full_key) {
 
-        let sctx = prepare_ctx(resolved_gd.as_deref(), &ctx.cwd, ctx, config);
-        let fmt = resolve_format(&sctx);
+        let (sctx, fmt) = prepare_and_resolve(resolved_gd.as_deref(), &ctx.cwd, ctx, config);
         let r = get_prompt_with_cache(&sctx, &entry.segments, &fmt);
         let rendered = r.trim_end_matches('\n').to_string();
         entry.rendered = rendered.clone();
@@ -233,14 +243,13 @@ pub fn render_cached(
 
     let (current_dir, bust_dir) = match resolved_gd {
         Some(ref gd) => {
-            let (c, b) = make_bust_dir(gd);
-            (c, Some(b))
+            let bust = make_bust_dir(gd);
+            (bust.clone(), Some(bust))
         }
         None => (ctx.cwd.clone(), None),
     };
 
-    let sctx = prepare_ctx(resolved_gd.as_deref(), &current_dir, ctx, config);
-    let fmt = resolve_format(&sctx);
+    let (sctx, fmt) = prepare_and_resolve(resolved_gd.as_deref(), &current_dir, ctx, config);
     let mut module_cache = ModuleCache::new();
     populate_cache(&sctx, &fmt, &mut module_cache);
     let rendered = get_prompt_with_cache(&sctx, &module_cache, &fmt);
@@ -629,4 +638,5 @@ mod tests {
         assert!(!cached.segments.contains_key("time"),
             "time must not appear after 3 stale-bucket re-renders");
     }
+
 }

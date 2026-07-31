@@ -15,7 +15,7 @@ const PIPE_TYPE_MESSAGE: DWORD = 4;
 const PIPE_WAIT: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
 
-macro_rules! bail { ($p:expr) => { unsafe { ffi::DisconnectNamedPipe($p); return Err(()); } } }
+macro_rules! pipe_error { ($p:expr) => { unsafe { ffi::DisconnectNamedPipe($p); return Err(()); } } }
 
 fn read_exact(pipe: HANDLE, buf: &mut [u8]) -> bool {
     unsafe {
@@ -106,20 +106,20 @@ fn send_response(pipe: HANDLE, output: &str) {
 
 fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> Result<(), ()> {
     let mut buf = [0u8; 4 + 32768 + 4 + 4096];
-    if !read_exact(pipe, &mut buf[..4]) { bail!(pipe); }
+    if !read_exact(pipe, &mut buf[..4]) { pipe_error!(pipe); }
     let cwd_len = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
-    if cwd_len > 32768 { bail!(pipe); }
-    if !read_exact(pipe, &mut buf[4..4 + cwd_len]) { bail!(pipe); }
+    if cwd_len > 32768 { pipe_error!(pipe); }
+    if !read_exact(pipe, &mut buf[4..4 + cwd_len]) { pipe_error!(pipe); }
     let props_start = 4 + cwd_len;
-    if !read_exact(pipe, &mut buf[props_start..props_start + 4]) { bail!(pipe); }
+    if !read_exact(pipe, &mut buf[props_start..props_start + 4]) { pipe_error!(pipe); }
     let props_len = u32::from_le_bytes(buf[props_start..props_start + 4].try_into().unwrap()) as usize;
-    if props_len > 4096 { bail!(pipe); }
+    if props_len > 4096 { pipe_error!(pipe); }
     let props_body_start = props_start + 4;
-    if !read_exact(pipe, &mut buf[props_body_start..props_body_start + props_len]) { bail!(pipe); }
+    if !read_exact(pipe, &mut buf[props_body_start..props_body_start + props_len]) { pipe_error!(pipe); }
     let total = props_body_start + props_len;
     let ParsedRequest { cwd, props } = match parse_request(&buf[..total]) {
         Some(r) => r,
-        None => { bail!(pipe); }
+        None => { pipe_error!(pipe); }
     };
     let git_dir = starship_daemon::find_git_dir(&cwd);
     let status_code = props.status_code.unwrap_or(0);
@@ -164,7 +164,7 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
     }
 
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
-    let v = if let Some(r) = repo_root {
+    let watcher_version = if let Some(r) = repo_root {
         watcher.ensure(r);
         watcher.flush();
         watcher.version(r)
@@ -172,7 +172,7 @@ fn handle_client(pipe: HANDLE, config_path: &mut PathBuf, cached_config: &mut to
         0
     };
 
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, v);
+    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, watcher_version);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);
     send_response(pipe, &output);

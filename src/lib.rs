@@ -33,7 +33,7 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
     use std::sync::LazyLock;
     static CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(result) = cache.get(cwd) {
         return result.clone();
     }

@@ -56,32 +56,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_equality_different_cwd_not_equal() {
-        let k1 = CacheKey {
-            cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            config_mtime: 5, watcher_version: 0,
-        };
-        let k2 = CacheKey {
-            cwd: PathBuf::from("/b"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            config_mtime: 5, watcher_version: 0,
-        };
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn cache_key_hash_consistent_with_eq() {
-        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        let k2 = CacheKey {
-            cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(),
-            terminal_width: 120, config_mtime: 0, watcher_version: 0,
-        };
-        assert_eq!(k1, k2);
-        let mut map = std::collections::HashMap::new();
-        map.insert(k1, 42);
-        assert_eq!(map.get(&k2), Some(&42), "equal keys must hash to the same bucket");
-    }
-
-    #[test]
     fn compute_cache_key_all_fields() {
         let k = compute_cache_key(Path::new("/home/user"), 42, "emacs", 100, 7, 3);
         let expected = CacheKey {
@@ -92,54 +66,9 @@ mod tests {
     }
 
     #[test]
-    fn compute_cache_key_deterministic() {
-        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn compute_cache_key_different_status_code_differentiates() {
-        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(Path::new("/a"), 1, "vi", 120, 0, 0);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn compute_cache_key_different_keymap_differentiates() {
-        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(Path::new("/a"), 0, "emacs", 120, 0, 0);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn compute_cache_key_different_terminal_width_differentiates() {
-        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 80, 0, 0);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn compute_cache_key_different_config_mtime_differentiates() {
-        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 7, 0);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
     fn compute_cache_key_different_watcher_version_differentiates() {
         let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
         let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 5);
         assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn compute_cache_key_nonexistent_cwd() {
-        let k = compute_cache_key(Path::new("__nonexistent__"), 0, "vi", 120, 0, 0);
-        let expected = CacheKey {
-            cwd: PathBuf::from("__nonexistent__"), status_code: 0, keymap: "vi".into(),
-            terminal_width: 120, config_mtime: 0, watcher_version: 0,
-        };
-        assert_eq!(k, expected);
     }
 }

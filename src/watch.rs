@@ -408,9 +408,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub");
         std::fs::create_dir_all(&p).unwrap();
-        let out = std::process::Command::new("git")
-            .args(["init"]).current_dir(&p).output();
-        if out.map_or(true, |o| !o.status.success()) { return; }
 
         let mut w = WatcherState::new();
         w.ensure(&p);
@@ -422,9 +419,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub");
         std::fs::create_dir_all(&p).unwrap();
-        let out = std::process::Command::new("git")
-            .args(["init"]).current_dir(&p).output();
-        if out.map_or(true, |o| !o.status.success()) { return; }
 
         let mut w = WatcherState::new();
         w.ensure(&p);
@@ -491,9 +485,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub");
         std::fs::create_dir_all(&p).unwrap();
-        let out = std::process::Command::new("git")
-            .args(["init"]).current_dir(&p).output();
-        if out.map_or(true, |o| !o.status.success()) { return; }
 
         let mut w = WatcherState::new();
         w.ensure(&p);
@@ -516,9 +507,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub");
         std::fs::create_dir_all(&p).unwrap();
-        let out = std::process::Command::new("git")
-            .args(["init"]).current_dir(&p).output();
-        if out.map_or(true, |o| !o.status.success()) { return; }
 
         let mut w = WatcherState::new();
         w.ensure(&p);

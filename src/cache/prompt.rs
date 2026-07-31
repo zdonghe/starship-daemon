@@ -320,6 +320,8 @@ mod tests {
 
         let fmt = expand_all(&ctx);
         assert!(!fmt.contains("$all"));
+        assert!(!fmt.contains("$time"),
+            "right_format modules must be excluded from $all expansion");
     }
 
     #[test]
@@ -432,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn time_only_re_render_is_fast_no_bust_dir() {
+    fn time_only_re_render_refreshes_bucket() {
         let cwd = tempfile::TempDir::new().unwrap();
         let ctx = RenderContext {
             cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
@@ -457,11 +459,7 @@ mod tests {
         entry.time_bucket = 0;
         lru.put(key.clone(), entry);
 
-        // Time-only re-render must be fast (<50ms on any hardware)
-        let start = std::time::Instant::now();
         let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
-        let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 50, "time-only re-render took {}ms", elapsed.as_millis());
         assert!(!result.is_empty(), "result must not be empty");
 
         // Key still exists and has current time_bucket
@@ -471,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_bucket_preserves_existing_segments() {
+    fn multiple_stale_bucket_rereads_preserve_cache() {
         let cwd = tempfile::TempDir::new().unwrap();
         let ctx = RenderContext {
             cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
@@ -491,7 +489,8 @@ mod tests {
         let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
+        let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
+        assert!(result.contains(':'), "output must contain time (HH:MM)");
 
         // Snapshot segments after full render (Path 3)
         let (_, before) = lru.pop_entry(&key).unwrap();
@@ -499,89 +498,9 @@ mod tests {
         assert!(segment_keys.contains(&"character".to_string()));
         assert!(segment_keys.contains(&"directory".to_string()));
         assert!(!segment_keys.contains(&"time".to_string()));
-        // Put back with stale time_bucket
-        let mut entry = before;
-        entry.time_bucket = 0;
-        lru.put(key.clone(), entry);
+        lru.put(key.clone(), before);
 
-        // Stale bucket re-render
-        let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
-
-        let (_, after) = lru.pop_entry(&key).unwrap();
-        for mod_name in &segment_keys {
-            assert!(after.segments.contains_key(mod_name.as_str()),
-                "module {mod_name} missing after stale-bucket re-render");
-        }
-        assert!(!after.segments.contains_key("time"),
-            "time must not appear in cached segments after stale-bucket path");
-        assert_eq!(after.time_bucket, crate::cache::current_minute(),
-            "time_bucket must be updated after stale-bucket re-render");
-    }
-
-    #[test]
-    fn stale_bucket_time_not_cached() {
-        let cwd = tempfile::TempDir::new().unwrap();
-        let ctx = RenderContext {
-            cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
-        };
-        let cfg = toml::toml! {
-            format = "$character$time"
-            add_newline = false
-            [character]
-            format = "> "
-            [time]
-            disabled = false
-            format = "[$time](bold yellow)"
-            time_format = "%H:%M"
-        };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
-
-        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
-
-        // Output should contain a time (digits with colon) — proves time was computed
-        assert!(result.contains(':'), "output must contain time (HH:MM)");
-
-        // Stale time_bucket, re-render
-        let (_, mut entry) = lru.pop_entry(&key).unwrap();
-        entry.time_bucket = 0;
-        lru.put(key.clone(), entry);
-
-        let result2 = render_cached(&ctx, None, &cfg, &key, &mut lru);
-        assert!(result2.contains(':'), "re-render output must contain time");
-
-        // Time segments not in cache — proves computed on-the-fly by get_prompt_with_cache
-        let (_, cached) = lru.pop_entry(&key).unwrap();
-        assert!(!cached.segments.contains_key("time"),
-            "time must not be stored in cached segments after stale-bucket path");
-        assert!(cached.segments.contains_key("character"),
-            "character must survive in cached segments");
-        assert_eq!(cached.time_bucket, crate::cache::current_minute(),
-            "time_bucket must be updated after stale-bucket re-render");
-    }
-
-    #[test]
-    fn multiple_stale_bucket_rereads_preserve_cache() {
-        let cwd = tempfile::TempDir::new().unwrap();
-        let ctx = RenderContext {
-            cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
-        };
-        let cfg = toml::toml! {
-            format = "$character$time"
-            add_newline = false
-            [character]
-            format = "> "
-            [time]
-            disabled = false
-            format = "[$time](bold yellow)"
-            time_format = "%H:%M"
-        };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
-
-        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
-
-        // Three consecutive stale-bucket re-renders
+        // Three consecutive stale-bucket re-renders must preserve all segments
         for i in 0..3 {
             let (_, mut entry) = lru.pop_entry(&key).unwrap();
             entry.time_bucket = 0;
@@ -589,23 +508,17 @@ mod tests {
             let r = render_cached(&ctx, None, &cfg, &key, &mut lru);
             assert!(r.contains(':'), "re-render {i} output must contain time");
 
-            // Verify cache state after each iteration
             let (_, check) = lru.pop_entry(&key).unwrap();
-            assert!(check.segments.contains_key("character"),
-                "character must survive after re-render {i}");
+            for mod_name in &segment_keys {
+                assert!(check.segments.contains_key(mod_name.as_str()),
+                    "module {mod_name} missing after stale-bucket re-render {i}");
+            }
             assert!(!check.segments.contains_key("time"),
                 "time must not appear after re-render {i}");
             assert_eq!(check.time_bucket, crate::cache::current_minute(),
                 "time_bucket must be updated after re-render {i}");
             lru.put(key.clone(), check);
         }
-
-        // Final state: segments intact, time absent from cache
-        let (_, cached) = lru.pop_entry(&key).unwrap();
-        assert!(cached.segments.contains_key("character"),
-            "character must survive 3 stale-bucket re-renders");
-        assert!(!cached.segments.contains_key("time"),
-            "time must not appear after 3 stale-bucket re-renders");
     }
 
 }

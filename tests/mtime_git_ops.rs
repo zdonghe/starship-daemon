@@ -104,7 +104,7 @@ fn bumps_on_git_mv() {
 }
 
 #[test]
-fn bumps_on_stash_push_pop() {
+fn bumps_on_stash_push() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     r.write("stash.txt", "original");
@@ -394,10 +394,21 @@ fn config_mtime_changes_cache_key() {
 
     let mtime_before = cache::get_mtime_ns(&cfg_path);
     let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_before, 0);
-    std::fs::write(&cfg_path, "format = 'changed'\n").unwrap();
-    settle();
-    let mtime_after = cache::get_mtime_ns(&cfg_path);
-    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_after, 0);
 
+    // Retry with escalating backoff: coarse-mtime filesystems (FAT, network)
+    // may not observe a rewrite within the same tick.
+    let mut mtime_after = mtime_before;
+    for delay_ms in [50u64, 100, 200, 400, 800] {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        std::fs::write(&cfg_path, "format = 'changed'\n").unwrap();
+        mtime_after = cache::get_mtime_ns(&cfg_path);
+        if mtime_after != mtime_before {
+            break;
+        }
+    }
+    assert_ne!(mtime_after, mtime_before,
+        "config mtime did not change across backoff retries (mtime granularity too coarse for this filesystem)");
+
+    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_after, 0);
     assert_ne!(key_before, key_after, "config change should produce different cache key (config_mtime tracked)");
 }

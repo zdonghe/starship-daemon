@@ -133,9 +133,47 @@ fn send_response(pipe: HANDLE, output: &str) -> bool {
 }
 
 fn disconnect_session(s: &mut Session) {
-    unsafe { ffi::DisconnectNamedPipe(s.pipe); }
+    let ok = unsafe { ffi::DisconnectNamedPipe(s.pipe) };
+    if ok != 0 && s.active && s.sync_bytes == 0 {
+        // An async read may be pending; DisconnectNamedPipe cancels it.
+        // Wait for the cancellation to fully complete before reusing the
+        // OVERLAPPED and resetting the event in rearm_connect, so a stale
+        // completion cannot signal the event after ResetEvent.
+        unsafe {
+            let mut bytes: DWORD = 0;
+            let _ = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 1);
+        }
+    }
     s.active = false;
     rearm_connect(s);
+}
+
+fn drain_session(
+    s: &mut Session,
+    config_path: &mut PathBuf,
+    cached_config: &mut toml::Table,
+    last_cfg_mtime: &mut u64,
+    lru: &mut LruCache<CacheKey, CachedValue>,
+    watcher: &mut WatcherState,
+) {
+    loop {
+        let n = if s.sync_bytes > 0 {
+            let n = s.sync_bytes;
+            s.sync_bytes = 0;
+            n
+        } else {
+            match complete_read(s) {
+                ReadResult::Data(n) => n,
+                ReadResult::Closed => { disconnect_session(s); break; }
+            }
+        };
+        if n < 4 { disconnect_session(s); break; }
+        if !process_request(s, config_path, cached_config, last_cfg_mtime, lru, watcher) {
+            disconnect_session(s);
+            break;
+        }
+        if !issue_read(s) { break; }
+    }
 }
 
 fn process_request(s: &mut Session, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> bool {
@@ -263,27 +301,12 @@ fn main() {
                 let s = &mut sessions[idx];
                 s.last_activity = Instant::now();
                 if s.active {
-                    loop {
-                        let n = if s.sync_bytes > 0 {
-                            let n = s.sync_bytes;
-                            s.sync_bytes = 0;
-                            n
-                        } else {
-                            match complete_read(s) {
-                                ReadResult::Data(n) => n,
-                                ReadResult::Closed => { disconnect_session(s); break; }
-                            }
-                        };
-                        if n < 4 { disconnect_session(s); break; }
-                        if !process_request(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher) {
-                            disconnect_session(s);
-                            break;
-                        }
-                        if !issue_read(s) { break; }
-                    }
+                    drain_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
                 } else {
                     s.active = true;
-                    issue_read(s);
+                    if issue_read(s) {
+                        drain_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
+                    }
                 }
             } else {
                 let w_idx = idx - sessions.len();

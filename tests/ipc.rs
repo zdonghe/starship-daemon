@@ -3,7 +3,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use starship_daemon::{ffi, PIPE_NAME};
+use starship_daemon::ffi;
 
 fn pipe_path() -> String {
     std::env::var("STARSHIP_DAEMON_PIPE")
@@ -273,6 +273,49 @@ mod common;
 use std::path::Path;
 
 #[test]
+fn ipc_sync_drop_race() {
+    with_daemon(|| {
+        let a = PipeClient::connect(1000).expect("A connect");
+        std::thread::sleep(Duration::from_millis(300));
+
+        unsafe {
+            let mut written: ffi::DWORD = 0;
+            let cwd_len = 1u32.to_le_bytes();
+            ffi::WriteFile(a.handle, cwd_len.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut());
+            ffi::FlushFileBuffers(a.handle);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+
+        let b = PipeClient::connect(1000).expect("B connect");
+        unsafe {
+            let mut written: ffi::DWORD = 0;
+            let cwd_bytes: &[u8] = b".";
+            let props_bytes = b"{}";
+            let buf = [1u8, 0u8, 0u8, 0u8];
+            let props_len = (props_bytes.len() as u32).to_le_bytes();
+            ffi::WriteFile(b.handle, buf.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut());
+            ffi::WriteFile(b.handle, cwd_bytes.as_ptr() as *const c_void, cwd_bytes.len() as u32, &mut written, std::ptr::null_mut());
+            ffi::WriteFile(b.handle, props_len.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut());
+            ffi::WriteFile(b.handle, props_bytes.as_ptr() as *const c_void, props_bytes.len() as u32, &mut written, std::ptr::null_mut());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+
+        unsafe {
+            let mut written: ffi::DWORD = 0;
+            let rest = [b'.', 2u8, 0u8, 0u8, 0u8, b'{', b'}'];
+            ffi::WriteFile(a.handle, rest.as_ptr() as *const c_void, rest.len() as u32, &mut written, std::ptr::null_mut());
+            ffi::FlushFileBuffers(a.handle);
+        }
+
+        let start = Instant::now();
+        let resp = b.read_response();
+        let elapsed = start.elapsed();
+        assert!(resp.is_some(), "B request dropped by sync-drop race (no response in 5s), elapsed={elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "B response stalled {elapsed:?} - sync-drop race");
+    });
+}
+
+#[test]
 fn ipc_git_push_stale_ahead() {
     let bare_dir = tempfile::TempDir::new().unwrap();
     let bare_path = bare_dir.path().join("remote.git");
@@ -346,12 +389,12 @@ fn ipc_git_push_stale_ahead() {
         common::git(Path::new(&repo_str), &["push"]);
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        let after_push = loop {
+        loop {
             let c = PipeClient::connect(1000).expect("connect after push");
             assert!(c.send_request(&repo_str, "{}"));
             let resp = c.read_response().expect("read after push");
             if !resp.contains('⇡') {
-                break resp;
+                break;
             }
             if Instant::now() > deadline {
                 panic!("⇡ never cleared within 5s after push (watcher cooldown race)");

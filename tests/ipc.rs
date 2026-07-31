@@ -71,7 +71,11 @@ impl PipeClient {
     }
 
     fn read_response(&self) -> Option<String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        self.read_response_timeout(5000)
+    }
+
+    fn read_response_timeout(&self, ms: u64) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_millis(ms);
         loop {
             unsafe {
                 let mut avail: ffi::DWORD = 0;
@@ -100,6 +104,13 @@ impl PipeClient {
                 total_read += read as usize;
             }
             String::from_utf8(resp_buf).ok()
+        }
+    }
+
+    fn write_raw(&self, bytes: &[u8]) -> bool {
+        unsafe {
+            let mut written: ffi::DWORD = 0;
+            ffi::WriteFile(self.handle, bytes.as_ptr() as *const c_void, bytes.len() as u32, &mut written, std::ptr::null_mut()) != 0
         }
     }
 }
@@ -397,4 +408,197 @@ fn ipc_git_push_stale_ahead() {
                 "prompt should NOT contain ⇡ after push (no longer ahead)");
         },
     );
+}
+
+fn setup_ahead_repo() -> (tempfile::TempDir, tempfile::TempDir, String) {
+    let bare_dir = tempfile::TempDir::new().unwrap();
+    let bare_path = bare_dir.path().join("remote.git");
+    std::fs::create_dir_all(&bare_path).unwrap();
+    common::git(&bare_path, &["init", "--bare"]);
+
+    let work_dir = tempfile::TempDir::new().unwrap();
+    let repo_path = work_dir.path().join("repo");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    common::git(&repo_path, &["init"]);
+    common::git(&repo_path, &["branch", "-M", "main"]);
+    common::git(&repo_path, &["config", "user.email", "test@test"]);
+    common::git(&repo_path, &["config", "user.name", "test"]);
+    common::git(&repo_path, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
+
+    std::fs::write(repo_path.join("init.txt"), "init").unwrap();
+    common::git(&repo_path, &["add", "init.txt"]);
+    common::git(&repo_path, &["commit", "-m", "init"]);
+    common::git(&repo_path, &["push", "-u", "origin", "main"]);
+    common::settle();
+
+    std::fs::write(repo_path.join("ahead.txt"), "ahead").unwrap();
+    common::git(&repo_path, &["add", "ahead.txt"]);
+    common::git(&repo_path, &["commit", "-m", "ahead"]);
+
+    let repo_str = repo_path.to_str().unwrap().to_string();
+    (bare_dir, work_dir, repo_str)
+}
+
+#[test]
+fn ipc_stalled_client_does_not_freeze_daemon() {
+    with_daemon(|| {
+        let a = PipeClient::connect(1000).expect("A connect");
+        // Send only the 4-byte cwd_len header, then stall. The async read
+        // state machine must not block other sessions while A's body is
+        // incomplete (main.rs:183).
+        assert!(a.write_raw(&1u32.to_le_bytes()));
+        std::thread::sleep(Duration::from_millis(300));
+
+        let b = PipeClient::connect(1000).expect("B connect");
+        let cwd_len = 1u32.to_le_bytes();
+        let props_len = 2u32.to_le_bytes();
+        assert!(b.write_raw(&cwd_len));
+        assert!(b.write_raw(b"."));
+        assert!(b.write_raw(&props_len));
+        assert!(b.write_raw(b"{}"));
+        // While A is stalled mid-request, B must still be served promptly.
+        let r = b.read_response_timeout(500);
+        assert!(r.is_some(),
+            "daemon froze on client A stalled mid-request - C1 refuted, got {r:?}");
+        check_response(&r.unwrap());
+
+        // A completes its request -> daemon serves A.
+        let rest = [b'.', 2, 0, 0, 0, b'{', b'}'];
+        assert!(a.write_raw(&rest));
+        let resp_a = a.read_response_timeout(2000).expect("A served after completing");
+        check_response(&resp_a);
+    });
+}
+
+#[test]
+fn ipc_zero_cwd_len_served() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // cwd_len = 0 is valid
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(b"{}");
+        assert!(c.write_raw(&buf));
+        let r = c.read_response_timeout(1000);
+        assert!(r.is_some(), "daemon disconnected a cwd_len=0 request - C2 refuted, got {r:?}");
+        check_response(&r.unwrap());
+    });
+}
+
+#[test]
+fn ipc_fragmented_header_accumulates() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        // Split the 4-byte cwd_len header across two writes. The state
+        // machine must accumulate partial reads, not disconnect (main.rs:183).
+        assert!(c.write_raw(&[1, 0]));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(c.write_raw(&[0, 0]));
+        assert!(c.write_raw(b"."));
+        assert!(c.write_raw(&2u32.to_le_bytes()));
+        assert!(c.write_raw(b"{}"));
+        let r = c.read_response_timeout(2000);
+        assert!(r.is_some(), "fragmented header disconnected the client - C6 refuted, got {r:?}");
+        check_response(&r.unwrap());
+    });
+}
+
+#[test]
+fn ipc_fragmented_cwd_accumulates() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        assert!(c.write_raw(&5u32.to_le_bytes())); // cwd_len = 5
+        std::thread::sleep(Duration::from_millis(100));
+        // Only 2 of the 5 cwd bytes; the rest arrive later.
+        assert!(c.write_raw(b"ab"));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(c.write_raw(b"cde"));
+        assert!(c.write_raw(&2u32.to_le_bytes()));
+        assert!(c.write_raw(b"{}"));
+        let r = c.read_response_timeout(2000);
+        assert!(r.is_some(), "fragmented cwd body disconnected the client - C6 refuted, got {r:?}");
+        check_response(&r.unwrap());
+    });
+}
+
+#[test]
+fn ipc_git_change_fresh_at_serve() {
+    let (_bare_dir, _work_dir, repo_str) = setup_ahead_repo();
+    with_daemon_config(
+        "format = \"$git_status\"\nadd_newline = false\n[git_status]\nformat = \"$ahead_behind\"\n",
+        || {
+            let c = PipeClient::connect(1000).expect("connect");
+            assert!(c.send_request(&repo_str, "{}"));
+            let before = c.read_response().expect("before push");
+            assert!(before.contains('⇡'),
+                "prompt should show ahead indicator before push, got: {before:?}");
+
+            let t_push = Instant::now();
+            common::git(Path::new(&repo_str), &["push"]);
+
+            // RDWC notification delivery is async and the watcher is polled
+            // (not event-driven), so the served prompt reflects the push only
+            // after the next loop wake. Poll until it clears.
+            let deadline = t_push + Duration::from_secs(5);
+            let mut stale_polls = 0u32;
+            let mut cleared_at = None;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(c.send_request(&repo_str, "{}"));
+                let resp = c.read_response().expect("response while polling");
+                if resp.contains('⇡') {
+                    stale_polls += 1;
+                } else {
+                    cleared_at = Some(Instant::now());
+                    break;
+                }
+            }
+            let elapsed = cleared_at.map(|t| t.duration_since(t_push));
+            println!("git-change-fresh: stale prompt for {stale_polls} poll(s), cleared in {elapsed:?} after push");
+            assert!(cleared_at.is_some(),
+                "served prompt never reflected the push within 5s - C7 refuted");
+        },
+    );
+}
+
+#[test]
+fn ipc_firehose_measurement() {
+    with_daemon(|| {
+        let a = PipeClient::connect(1000).expect("A connect");
+        let b = PipeClient::connect(1000).expect("B connect");
+
+        // 30 distinct cwds -> 30 cache misses -> 30 real renders while B waits.
+        let mut burst = Vec::new();
+        for i in 0..30 {
+            let cwd = format!("cwd{i}");
+            burst.extend_from_slice(&(cwd.len() as u32).to_le_bytes());
+            burst.extend_from_slice(cwd.as_bytes());
+            burst.extend_from_slice(&2u32.to_le_bytes());
+            burst.extend_from_slice(b"{}");
+        }
+        assert!(a.write_raw(&burst));
+        std::thread::sleep(Duration::from_millis(20));
+
+        let t0 = Instant::now();
+        let cwd_len = 1u32.to_le_bytes();
+        let props_len = 2u32.to_le_bytes();
+        assert!(b.write_raw(&cwd_len));
+        assert!(b.write_raw(b"."));
+        assert!(b.write_raw(&props_len));
+        assert!(b.write_raw(b"{}"));
+        let resp_b = b.read_response_timeout(5000);
+        let elapsed = t0.elapsed();
+        println!("firehose: B's request latency while A drains 30 uncached renders: {elapsed:?}");
+        assert!(resp_b.is_some(), "B should eventually be served");
+
+        let mut count = 0;
+        while count < 30 {
+            if a.read_response_timeout(2000).is_some() {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        assert_eq!(count, 30, "A should receive all 30 responses, got {count}");
+    });
 }

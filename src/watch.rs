@@ -186,10 +186,6 @@ impl WatcherState {
         }
     }
 
-    pub fn change_events(&self) -> impl Iterator<Item = HANDLE> + '_ {
-        self.entries.iter().map(|e| e.change_event)
-    }
-
     pub fn num_entries(&self) -> usize {
         self.entries.len()
     }

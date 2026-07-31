@@ -33,6 +33,7 @@ function Get-StarshipPrompt
             $script:DaemonPipe = $pipe
         }
 
+        # pwsh 7+ only: process cwd tracks Set-Location in Core; 5.1 would go stale.
         $cwd = [System.IO.Directory]::GetCurrentDirectory()
         $cwdBytes = [Text.Encoding]::UTF8.GetBytes($cwd)
 

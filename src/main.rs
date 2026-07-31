@@ -24,21 +24,6 @@ const MAX_IDLE_MS: u128 = 5000;
 const MAX_REQS_PER_WAKE: u32 = 8;
 const BUF_SIZE: usize = 4 + 32768 + 4 + 4096;
 
-fn write_all(pipe: HANDLE, buf: &[u8]) -> bool {
-    unsafe {
-        let mut ol: ffi::OVERLAPPED = mem::zeroed();
-        let mut w: DWORD = 0;
-        let ret = ffi::WriteFile(pipe, buf.as_ptr() as LPCVOID, buf.len() as DWORD, &mut w, &mut ol as *mut _ as *mut c_void);
-        if ret != 0 { return w == buf.len() as DWORD; }
-        if ffi::GetLastError() == ERROR_IO_PENDING {
-            let mut bytes: DWORD = 0;
-            return ffi::GetOverlappedResult(pipe, &mut ol as *mut _ as *mut c_void, &mut bytes, 1) != 0
-                && bytes == buf.len() as DWORD;
-        }
-        false
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ReadStage {
     Header,
@@ -54,6 +39,8 @@ struct Session {
     active: bool,
     sync_bytes: u32,
     read_in_flight: bool,
+    write_in_flight: bool,
+    write_buf: Vec<u8>,
     stage: ReadStage,
     want: usize,
     got: usize,
@@ -70,6 +57,8 @@ impl Session {
             active: false,
             sync_bytes: 0,
             read_in_flight: false,
+            write_in_flight: false,
+            write_buf: Vec::new(),
             stage: ReadStage::Header,
             want: 4,
             got: 0,
@@ -88,6 +77,7 @@ fn issue_read_at(s: &mut Session, offset: usize, count: usize) -> IssueOutcome {
         let mut read: DWORD = 0;
         let ret = ffi::ReadFile(s.pipe, s.buf.as_mut_ptr().add(offset) as LPVOID, count as DWORD, &mut read, &mut s.ol as *mut _ as *mut c_void);
         if ret != 0 {
+            if read == 0 { return IssueOutcome::Error; }
             s.sync_bytes = read;
             s.read_in_flight = false;
             return IssueOutcome::Sync;
@@ -111,6 +101,36 @@ fn complete_read(s: &mut Session) -> Option<u32> {
     }
 }
 
+enum WriteIssue { Done, Pending, Error }
+
+fn issue_write(s: &mut Session) -> WriteIssue {
+    unsafe {
+        s.ol = mem::zeroed();
+        s.ol.h_event = s.event;
+        ffi::ResetEvent(s.event);
+        let mut w: DWORD = 0;
+        let ret = ffi::WriteFile(s.pipe, s.write_buf.as_ptr() as LPCVOID, s.write_buf.len() as DWORD, &mut w, &mut s.ol as *mut _ as *mut c_void);
+        if ret != 0 { return WriteIssue::Done; }
+        let err = ffi::GetLastError();
+        if err == ERROR_IO_PENDING {
+            s.write_in_flight = true;
+            return WriteIssue::Pending;
+        }
+        WriteIssue::Error
+    }
+}
+
+fn complete_write(s: &mut Session) -> Option<u32> {
+    unsafe {
+        let mut bytes: DWORD = 0;
+        let ok = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 0);
+        if ok != 0 && bytes == s.write_buf.len() as DWORD { return Some(bytes); }
+        if ok != 0 { return Some(0); }
+        if ffi::GetLastError() == ERROR_IO_INCOMPLETE { return None; }
+        Some(0)
+    }
+}
+
 fn rearm_connect(s: &mut Session) {
     unsafe {
         s.ol = mem::zeroed();
@@ -123,16 +143,10 @@ fn rearm_connect(s: &mut Session) {
     }
 }
 
-fn send_response(pipe: HANDLE, output: &str) -> bool {
-    let b = output.as_bytes();
-    let len_bytes = (b.len() as u32).to_le_bytes();
-    write_all(pipe, &len_bytes) && write_all(pipe, b)
-}
-
 fn disconnect_session(s: &mut Session) {
-    let ok = unsafe { ffi::DisconnectNamedPipe(s.pipe) };
-    if ok != 0 && s.active && s.read_in_flight {
-        // A read is pending; DisconnectNamedPipe cancels it.
+    unsafe { ffi::DisconnectNamedPipe(s.pipe); }
+    if s.read_in_flight || s.write_in_flight {
+        // An op is pending; DisconnectNamedPipe cancels it.
         // Wait for the cancellation to fully complete before reusing the
         // OVERLAPPED and resetting the event in rearm_connect, so a stale
         // completion cannot signal the event after ResetEvent.
@@ -143,6 +157,8 @@ fn disconnect_session(s: &mut Session) {
     }
     s.active = false;
     s.read_in_flight = false;
+    s.write_in_flight = false;
+    s.write_buf.clear();
     s.sync_bytes = 0;
     s.stage = ReadStage::Header;
     s.want = 4;
@@ -160,8 +176,17 @@ fn service_session(
 ) {
     let mut served = 0u32;
     loop {
-        // Consume whatever read completed (sync-completed or pending-completed).
-        if s.sync_bytes > 0 {
+        // Consume whatever operation completed (write, sync read, or pending read).
+        if s.write_in_flight {
+            match complete_write(s) {
+                Some(n) => {
+                    s.write_in_flight = false;
+                    s.write_buf.clear();
+                    if n == 0 { disconnect_session(s); return; }
+                }
+                None => { unsafe { ffi::ResetEvent(s.event); } return; } // still pending
+            }
+        } else if s.sync_bytes > 0 {
             s.got += s.sync_bytes as usize;
             s.sync_bytes = 0;
         } else if s.read_in_flight {
@@ -171,7 +196,7 @@ fn service_session(
                     if n == 0 { disconnect_session(s); return; }
                     s.got += n as usize;
                 }
-                None => return, // still pending; the event will fire again
+                None => { unsafe { ffi::ResetEvent(s.event); } return; } // still pending
             }
         } else {
             return; // nothing in flight
@@ -210,6 +235,14 @@ fn service_session(
                     s.stage = ReadStage::Header;
                     s.want = 4;
                     s.got = 0;
+                    // Issue the staged response asynchronously; never block the
+                    // daemon on a full out-buffer. A Pending write returns to
+                    // the event loop and resumes when the client drains.
+                    match issue_write(s) {
+                        WriteIssue::Done => {}
+                        WriteIssue::Pending => return,
+                        WriteIssue::Error => { disconnect_session(s); return; }
+                    }
                     if served >= MAX_REQS_PER_WAKE {
                         // Firehose cap: self-wake so other sessions and the
                         // watcher get serviced this loop iteration.
@@ -232,6 +265,8 @@ fn service_session(
 
 fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> bool {
     let ParsedRequest { cwd, props } = match parse_request(&s.buf[..total]) { Some(r) => r, None => { return false; } };
+    // Lenient empty cwd: feed "." so rendering never sees a zero-length path.
+    let cwd = if cwd.as_os_str().is_empty() { PathBuf::from(".") } else { cwd };
     let git_dir = starship_daemon::find_git_dir(&cwd);
     let status_code = props.status_code.unwrap_or(0);
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
@@ -270,7 +305,8 @@ fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cac
     if props.disable_cache.unwrap_or(false) {
         let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
         let output = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
-        return send_response(s.pipe, &output);
+        stage_response(s, &output);
+        return true;
     }
 
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
@@ -285,7 +321,15 @@ fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cac
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);
-    send_response(s.pipe, &output)
+    stage_response(s, &output);
+    true
+}
+
+fn stage_response(s: &mut Session, output: &str) {
+    let mut wb = Vec::with_capacity(4 + output.len());
+    wb.extend_from_slice(&(output.len() as u32).to_le_bytes());
+    wb.extend_from_slice(output.as_bytes());
+    s.write_buf = wb;
 }
 
 fn main() {
@@ -343,17 +387,24 @@ fn main() {
         let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, timeout) };
         watcher.process_signaled();
         if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
-            let idx = (rc - ffi::WAIT_OBJECT_0) as usize;
-            let s = &mut sessions[idx];
-            s.last_activity = Instant::now();
-            if s.active {
-                service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
-            } else {
-                s.active = true;
-                match issue_read_at(s, 0, 4) {
-                    IssueOutcome::Sync => service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher),
-                    IssueOutcome::Pending => {}
-                    IssueOutcome::Error => disconnect_session(s),
+            // Service every signaled session, not just the lowest-index one.
+            // Otherwise a firehose session that self-wakes (SetEvent at the
+            // MAX_REQS_PER_WAKE cap) keeps re-selecting itself via WFMO and
+            // starves all higher-index sessions indefinitely.
+            for idx in 0..sessions.len() {
+                let ev = sessions[idx].event;
+                if unsafe { ffi::WaitForSingleObject(ev, 0) } != ffi::WAIT_OBJECT_0 { continue; }
+                let s = &mut sessions[idx];
+                s.last_activity = Instant::now();
+                if s.active {
+                    service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
+                } else {
+                    s.active = true;
+                    match issue_read_at(s, 0, 4) {
+                        IssueOutcome::Sync => service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher),
+                        IssueOutcome::Pending => {}
+                        IssueOutcome::Error => disconnect_session(s),
+                    }
                 }
             }
         }

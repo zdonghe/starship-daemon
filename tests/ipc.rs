@@ -602,3 +602,137 @@ fn ipc_firehose_measurement() {
         assert_eq!(count, 30, "A should receive all 30 responses, got {count}");
     });
 }
+
+/// Runs `f` in a thread, returning its result, or None if it exceeds
+/// `timeout_ms`. Converts a daemon-freeze hang into a timed test failure. The
+/// worker thread may stay blocked past the timeout; the daemon is killed on
+/// drop by the enclosing `with_daemon*`, breaking its pipes and unblocking it.
+fn with_hard_timeout<T, F>(timeout_ms: u64, f: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_millis(timeout_ms)).ok()
+}
+
+#[test]
+fn ipc_unread_responses_do_not_freeze_daemon() {
+    // A floods requests but never reads the responses. The daemon's response
+    // writes must not block the event loop on the full out-buffer; B must
+    // still be served.
+    let big_char = ">".repeat(2000);
+    let config = format!(
+        "format = \"$character\"\nadd_newline = false\n[character]\nformat = \"{big_char}\"\n"
+    );
+    with_daemon_config(&config, || {
+        let a = PipeClient::connect(1000).expect("A connect");
+        // ~200 requests (11 bytes each) = ~2.2KB, fits in A's in-buffer. Each
+        // response is ~2004 bytes, so ~32 responses fill the 64KB out-buffer.
+        // A never drains, so the daemon's writes to A go pending forever.
+        let mut burst = Vec::new();
+        for _ in 0..200 {
+            burst.extend_from_slice(&1u32.to_le_bytes());
+            burst.extend_from_slice(b".");
+            burst.extend_from_slice(&2u32.to_le_bytes());
+            burst.extend_from_slice(b"{}");
+        }
+        assert!(a.write_raw(&burst), "A should buffer its burst");
+        // Give the daemon time to wedge in write_all.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let served = with_hard_timeout(7000, || {
+            let Some(b) = PipeClient::connect(1000) else { return false; };
+            if !b.send_request(".", "{}") { return false; }
+            b.read_response_timeout(5000).is_some()
+        });
+        assert_eq!(served, Some(true),
+            "daemon froze on A's unread responses (synchronous write_all)");
+    });
+}
+
+#[test]
+fn ipc_firehose_client_does_not_starve_others() {
+    // A streams requests continuously so its in-buffer never drains. The
+    // firehose cap self-wakes A via SetEvent and WFMO returns the lowest-index
+    // signaled handle, so A monopolizes the loop and B is never serviced. B
+    // must still be served while A streams.
+    with_daemon(|| {
+        let a = PipeClient::connect(1000).expect("A connect");
+        // HANDLE is a raw pointer (not Send); pass it as usize (Send) and
+        // reconstruct inside the threads. Only writer/reader threads touch the
+        // handle, and the daemon stays alive for the whole test, so this is safe.
+        let handle = a.handle as usize;
+        // Never drop `a`: its Drop closes the handle, which blocks forever if
+        // the writer/reader threads are stuck in pending I/O on it (the
+        // daemon stops draining A once it is wedged). Leak it; the process
+        // cleans up on exit.
+        let _a = std::mem::ManuallyDrop::new(a);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let stop3 = stop.clone();
+        let req = {
+            let mut r = Vec::new();
+            r.extend_from_slice(&1u32.to_le_bytes());
+            r.extend_from_slice(b".");
+            r.extend_from_slice(&2u32.to_le_bytes());
+            r.extend_from_slice(b"{}");
+            r
+        };
+        // Writer floods requests in a tight loop (A's in-buffer stays full).
+        // Reader drains responses so the write side never wedges - this
+        // isolates the read-side starvation (finding 2).
+        let _writer = std::thread::spawn(move || {
+            let h = handle as ffi::HANDLE;
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut w: ffi::DWORD = 0;
+                unsafe {
+                    if ffi::WriteFile(h, req.as_ptr() as *const c_void, req.len() as u32, &mut w, std::ptr::null_mut()) == 0 {
+                        break;
+                    }
+                }
+            }
+        });
+        let _reader = std::thread::spawn(move || {
+            let h = handle as ffi::HANDLE;
+            while !stop3.load(std::sync::atomic::Ordering::Relaxed) {
+                unsafe {
+                    let mut avail: ffi::DWORD = 0;
+                    if ffi::PeekNamedPipe(h, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut()) == 0 || avail < 4 {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    let mut len_buf = [0u8; 4];
+                    let mut r: ffi::DWORD = 0;
+                    if ffi::ReadFile(h, len_buf.as_mut_ptr() as *mut c_void, 4, &mut r, std::ptr::null_mut()) == 0 || r != 4 { return; }
+                    let body_len = u32::from_le_bytes(len_buf) as usize;
+                    let mut body = vec![0u8; body_len];
+                    let mut total = 0;
+                    while total < body_len {
+                        let chunk = (body_len - total) as u32;
+                        if ffi::ReadFile(h, body[total..].as_mut_ptr() as *mut c_void, chunk, &mut r, std::ptr::null_mut()) == 0 {
+                            return;
+                        }
+                        total += r as usize;
+                    }
+                }
+            }
+        });
+        // Let A saturate its pipe.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let served = with_hard_timeout(4000, || {
+            let Some(b) = PipeClient::connect(1000) else { return false; };
+            if !b.send_request(".", "{}") { return false; }
+            b.read_response_timeout(1500).is_some()
+        });
+        // Stop the flood and let the writer/reader threads exit on their own.
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(served, Some(true),
+            "daemon starved B while A streamed continuously (firehose self-wake)");
+    });
+}

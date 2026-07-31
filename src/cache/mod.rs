@@ -56,15 +56,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_equality_reflexive() {
-        let k = CacheKey {
-            cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
-            config_mtime: 5, watcher_version: 0,
-        };
-        assert_eq!(k, k);
-    }
-
-    #[test]
     fn cache_key_equality_different_cwd_not_equal() {
         let k1 = CacheKey {
             cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(), terminal_width: 120,
@@ -75,6 +66,19 @@ mod tests {
             config_mtime: 5, watcher_version: 0,
         };
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_hash_consistent_with_eq() {
+        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
+        let k2 = CacheKey {
+            cwd: PathBuf::from("/a"), status_code: 0, keymap: "vi".into(),
+            terminal_width: 120, config_mtime: 0, watcher_version: 0,
+        };
+        assert_eq!(k1, k2);
+        let mut map = std::collections::HashMap::new();
+        map.insert(k1, 42);
+        assert_eq!(map.get(&k2), Some(&42), "equal keys must hash to the same bucket");
     }
 
     #[test]

@@ -4,13 +4,20 @@ pub fn load_config(path: &Path) -> Option<PathBuf> {
     path.is_file().then(|| path.to_path_buf())
 }
 
-pub fn default_config_path() -> PathBuf {
-    if let Ok(cfg) = std::env::var("STARSHIP_CONFIG") {
+pub(crate) fn config_path_from_env(config_var: Option<String>, home_dir: Option<String>) -> PathBuf {
+    if let Some(cfg) = config_var {
         return PathBuf::from(cfg);
     }
-    std::env::var("USERPROFILE")
+    home_dir
         .map(|h| PathBuf::from(h).join(".config").join("starship.toml"))
-        .unwrap_or_else(|_| PathBuf::from(".config/starship.toml"))
+        .unwrap_or_else(|| PathBuf::from(".config/starship.toml"))
+}
+
+pub fn default_config_path() -> PathBuf {
+    config_path_from_env(
+        std::env::var("STARSHIP_CONFIG").ok(),
+        std::env::var("USERPROFILE").ok(),
+    )
 }
 
 pub fn read_config(path: &Path) -> toml::Table {
@@ -64,15 +71,34 @@ mod tests {
     }
 
     #[test]
-    fn default_config_path_uses_starship_config_env_var() {
-        let prev = std::env::var("STARSHIP_CONFIG").ok();
-        unsafe { std::env::set_var("STARSHIP_CONFIG", "C:\\custom\\starship.toml"); }
-        let p = default_config_path();
-        assert_eq!(p, PathBuf::from("C:\\custom\\starship.toml"));
-        match prev {
-            Some(v) => unsafe { std::env::set_var("STARSHIP_CONFIG", v); },
-            None => unsafe { std::env::remove_var("STARSHIP_CONFIG"); },
-        }
+    fn config_path_from_env_uses_config_var() {
+        assert_eq!(
+            config_path_from_env(Some("C:\\custom\\starship.toml".to_string()), None),
+            PathBuf::from("C:\\custom\\starship.toml")
+        );
+    }
+
+    #[test]
+    fn config_path_from_env_config_var_wins_over_home_dir() {
+        let cfg = Some("C:\\custom\\starship.toml".to_string());
+        let home = Some("C:\\Users\\me".to_string());
+        assert_eq!(config_path_from_env(cfg, home), PathBuf::from("C:\\custom\\starship.toml"));
+    }
+
+    #[test]
+    fn config_path_from_env_uses_home_dir_fallback() {
+        assert_eq!(
+            config_path_from_env(None, Some("C:\\Users\\me".to_string())),
+            PathBuf::from("C:\\Users\\me\\.config\\starship.toml")
+        );
+    }
+
+    #[test]
+    fn config_path_from_env_defaults_to_relative() {
+        assert_eq!(
+            config_path_from_env(None, None),
+            PathBuf::from(".config/starship.toml")
+        );
     }
 
     #[test]

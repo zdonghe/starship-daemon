@@ -54,6 +54,24 @@ fn render_output_is_deterministic() {
 }
 
 #[test]
+fn render_auto_finds_git_dir_when_none_passed() {
+    let r = TestRepo::new();
+    let cfg = toml::Table::new();
+    let ctx = cache::RenderContext {
+        cwd: r.path().to_path_buf(),
+        terminal_width: 120,
+        status_code: 0,
+        keymap: "vi".to_string(),
+    };
+
+    let git_dir = starship_daemon::find_git_dir(r.path());
+    let explicit = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg);
+    let auto = cache::render_prompt_with_config(&ctx, None, &cfg);
+    assert!(!auto.is_empty(), "auto-find fallback should produce output");
+    assert_eq!(auto, explicit, "auto-find and explicit git_dir should render identically");
+}
+
+#[test]
 fn different_cwd_produces_different_render() {
     let r = TestRepo::new();
     let cfg = toml::Table::new();

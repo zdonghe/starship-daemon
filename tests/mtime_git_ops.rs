@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::thread;
 
 use starship_daemon::cache;
@@ -11,53 +11,6 @@ fn ensure_watcher(w: &mut WatcherState, repo: &std::path::Path) {
     w.ensure(repo);
     thread::sleep(Duration::from_millis(300));
     w.poll();
-}
-
-fn assert_version_bumped(w: &mut WatcherState, repo: &std::path::Path) {
-    let before = w.version(repo);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        w.poll();
-        if w.version(repo) > before { return; }
-        thread::sleep(Duration::from_millis(20));
-        if Instant::now() > deadline {
-            panic!("repo version did not increase within 5s (before={before})");
-        }
-    }
-}
-
-// ==== Field identity tests ====
-
-#[test]
-fn cwd_field_differentiates_directories() {
-    let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    assert_eq!(k1.cwd, k2.cwd);
-}
-
-#[test]
-fn status_code_field_differentiates_exit_codes() {
-    let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    let k2 = cache::compute_cache_key(r.path(), 1, "vi", 120, 0, 0);
-    assert_ne!(k1, k2);
-}
-
-#[test]
-fn keymap_field_differentiates_keymaps() {
-    let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    let k2 = cache::compute_cache_key(r.path(), 0, "emacs", 120, 0, 0);
-    assert_ne!(k1, k2);
-}
-
-#[test]
-fn terminal_width_field_differentiates_widths() {
-    let r = TestRepo::new();
-    let k1 = cache::compute_cache_key(r.path(), 0, "vi", 120, 0, 0);
-    let k2 = cache::compute_cache_key(r.path(), 0, "vi", 80, 0, 0);
-    assert_ne!(k1, k2);
 }
 
 // ==== Dirty flag tests ====

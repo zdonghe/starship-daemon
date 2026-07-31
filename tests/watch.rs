@@ -2,7 +2,7 @@ use starship_daemon::ffi;
 use starship_daemon::watch::WatcherState;
 
 mod common;
-use common::TestRepo;
+use common::{assert_version_bumped, TestRepo};
 
 fn write_file(repo: &TestRepo, name: &str, content: &str) {
     repo.write(name, content);
@@ -64,6 +64,58 @@ fn poll_increases_version_on_file_change() {
     settle_watcher();
     w.poll();
     assert!(w.version(&p) > v1, "version should increase again after second file write");
+}
+
+#[test]
+fn anchored_doublestar_rule_does_not_ignore_sibling_paths() {
+    let repo = TestRepo::new();
+    let p = repopath(&repo);
+
+    repo.write(".gitignore", "a/**/b\n");
+    std::fs::create_dir_all(p.join("x").join("a")).unwrap();
+
+    let mut w = WatcherState::new();
+    w.ensure(&p);
+
+    repo.write("x/a/b", "hello");
+    assert_version_bumped(&mut w, &p);
+}
+
+#[test]
+fn anchored_doublestar_rule_suppresses_matching_paths() {
+    let repo = TestRepo::new();
+    let p = repopath(&repo);
+
+    repo.write(".gitignore", "a/**/b\n");
+    std::fs::create_dir_all(p.join("a").join("x")).unwrap();
+
+    let mut w = WatcherState::new();
+    w.ensure(&p);
+    let v0 = w.version(&p);
+
+    repo.write("a/x/b", "hello");
+    for _ in 0..10 {
+        w.poll();
+        assert_eq!(w.version(&p), v0, "a/x/b must match anchored a/**/b and not bump");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    repo.write("visible.txt", "hello");
+    assert_version_bumped(&mut w, &p);
+}
+
+#[test]
+fn trailing_doublestar_does_not_ignore_bare_component() {
+    let repo = TestRepo::new();
+    let p = repopath(&repo);
+
+    repo.write(".gitignore", "a/**\n");
+
+    let mut w = WatcherState::new();
+    w.ensure(&p);
+
+    repo.write("a", "file named a at root");
+    assert_version_bumped(&mut w, &p);
 }
 
 #[test]

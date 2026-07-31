@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use starship_daemon::watch::WatcherState;
 
 pub const SLEEP_MS: u64 = 15;
 
@@ -14,6 +16,19 @@ pub fn git(repo: &Path, args: &[&str]) {
         .output()
         .expect("git command failed");
     assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+}
+
+pub fn assert_version_bumped(w: &mut WatcherState, repo: &Path) {
+    let before = w.version(repo);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        w.poll();
+        if w.version(repo) > before { return; }
+        thread::sleep(Duration::from_millis(20));
+        if Instant::now() > deadline {
+            panic!("repo version did not increase within 5s (before={before})");
+        }
+    }
 }
 
 pub fn settle() {

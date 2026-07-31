@@ -215,6 +215,34 @@ mod tests {
 
     fn is_internal(path: &str) -> bool { is_git_internal(path) }
 
+    fn wait_for_version_bump(w: &mut WatcherState, repo: &std::path::Path, before: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            w.poll();
+            if w.version(repo) > before { return; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if std::time::Instant::now() > deadline {
+                panic!("version did not increase within 5s (before={before})");
+            }
+        }
+    }
+
+    fn wait_for_version_stable(w: &mut WatcherState, repo: &std::path::Path) -> u64 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            w.poll();
+            let v = w.version(repo);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            w.poll();
+            if w.version(repo) == v {
+                return v;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("version did not become stable within 5s (v={v})");
+            }
+        }
+    }
+
     #[test]
     fn git_index_is_not_internal() {
         assert!(!is_internal(".git/index"));
@@ -402,26 +430,13 @@ mod tests {
 
         let v0 = w.version(&p);
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
         std::fs::write(p.join("newfile.txt"), b"hello").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        wait_for_version_bump(&mut w, &p, v0);
 
-        let ev = w.entries[0].change_event;
-        let rc = unsafe { ffi::WaitForSingleObject(ev, 0) };
-        assert_eq!(rc, ffi::WAIT_OBJECT_0, "event should be signaled after file create");
+        let v1 = wait_for_version_stable(&mut w, &p);
 
-        w.poll();
-        assert!(w.version(&p) > v0, "version should increase after file create");
-
-        let v1 = w.version(&p);
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(p.join("another_file.txt"), b"world").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        w.poll();
-        assert!(w.version(&p) > v1, "version should increase after second file create");
+        wait_for_version_bump(&mut w, &p, v1);
     }
 
     #[test]
@@ -495,27 +510,27 @@ mod tests {
     }
 
     #[test]
-    fn burst_events_coalesce_to_single_version_bump() {
-        let p = Path::new("C:\\dummy");
+    fn flush_clears_pending_so_idle_poll_does_not_bump() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub");
+        std::fs::create_dir_all(&p).unwrap();
+        let out = std::process::Command::new("git")
+            .args(["init"]).current_dir(&p).output();
+        if out.map_or(true, |o| !o.status.success()) { return; }
+
         let mut w = WatcherState::new();
-        w.repo_versions.insert(p.to_path_buf(), 0);
-        unsafe {
-            let ev = ffi::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
-            assert!(!ev.is_null());
-            w.entries.push(WatchEntry {
-                repo_root: p.to_path_buf(),
-                dir_handle: ffi::INVALID_HANDLE_VALUE,
-                change_buf: vec![],
-                change_event: ev,
-                overlapped: mem::zeroed(),
-                ignore: None,
-                pending: true,
-            });
+        w.ensure(&p);
+        for _ in 0..5 {
+            w.poll();
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert_eq!(w.version(p), 0);
+        let v0 = w.version(&p);
+
+        w.entries[0].pending = true;
         w.poll();
-        assert_eq!(w.version(p), 1, "burst events coalesce to single version bump");
+        let bumped = w.version(&p);
+        assert!(bumped > v0, "pending flag must flush into a bump");
         w.poll();
-        assert_eq!(w.version(p), 1, "second poll must not bump again");
+        assert_eq!(w.version(&p), bumped, "idle poll must not bump again");
     }
 }

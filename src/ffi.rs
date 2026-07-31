@@ -47,8 +47,9 @@ unsafe extern "system" {
     pub fn WriteFile(h: HANDLE, buf: LPCVOID, len: DWORD, written: LPDWORD, overlapped: *mut c_void) -> BOOL;
     pub fn WaitForMultipleObjects(count: DWORD, handles: *const HANDLE, wait_all: BOOL, ms: DWORD) -> DWORD;
     pub fn WaitForSingleObject(handle: HANDLE, ms: DWORD) -> DWORD;
-    pub fn FlushFileBuffers(h: HANDLE) -> BOOL;
     pub fn GetLastError() -> DWORD;
+    pub fn FlushFileBuffers(h: HANDLE) -> BOOL;
     pub fn PeekNamedPipe(h: HANDLE, buf: LPVOID, buf_size: DWORD, bytes_read: LPDWORD, total_avail: LPDWORD, bytes_left: LPDWORD) -> BOOL;
     pub fn CancelIoEx(h: HANDLE, overlapped: *mut c_void) -> BOOL;
+    pub fn SetNamedPipeHandleState(h: HANDLE, mode: LPDWORD, max_collect: LPDWORD, timeout: LPDWORD) -> BOOL;
 }

@@ -1,11 +1,11 @@
 $script:DaemonPath = $env:STARSHIP_DAEMON_PATH
 $script:LastStarshipConfig = $null
+$script:DaemonPipe = $null
 
 function Start-StarshipDaemon
 {
     if ([string]::IsNullOrEmpty($script:DaemonPath))
-    { return 
-    }
+    { return }
     if ((Get-Process -Name starship-daemon -ErrorAction SilentlyContinue).Count -eq 0)
     {
         $null = Start-Process -FilePath $script:DaemonPath -WindowStyle Hidden
@@ -16,15 +16,21 @@ function Get-StarshipPrompt
 {
     param([int]$ExitCode, [string]$Keymap, [int]$Width)
 
-    $pipe = try
+    $pipe = $script:DaemonPipe
+    if ($null -eq $pipe)
     {
-        $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", "starship-daemon")
-        $p.Connect(10); $p
-    } catch
-    { return $null 
+        $pipe = try
+        {
+            $pipeName = if ($env:STARSHIP_DAEMON_PIPE) { $env:STARSHIP_DAEMON_PIPE } else { "starship-daemon" }
+            $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
+            $p.Connect(10); $p
+        } catch
+        { return $null 
+        }
+        $script:DaemonPipe = $pipe
     }
 
-    $cwd = (Get-Location).ProviderPath
+    $cwd = [System.IO.Directory]::GetCurrentDirectory()
     $cwdBytes = [Text.Encoding]::UTF8.GetBytes($cwd)
 
     $propsJson = '{"status_code":' + $ExitCode + ',"keymap":"' + $Keymap + '","terminal_width":' + $Width
@@ -44,38 +50,50 @@ function Get-StarshipPrompt
     $propsJson += '}'
     $propsBytes = [Text.Encoding]::UTF8.GetBytes($propsJson)
 
-    $pipe.Write([BitConverter]::GetBytes([uint32]$cwdBytes.Length), 0, 4)
-    $pipe.Write($cwdBytes, 0, $cwdBytes.Length)
-    $pipe.Write([BitConverter]::GetBytes([uint32]$propsBytes.Length), 0, 4)
-    $pipe.Write($propsBytes, 0, $propsBytes.Length)
-    $pipe.Flush()
-
-    $lenBuf = [byte[]]::new(4)
-    $result = $null
-    if ($pipe.Read($lenBuf, 0, 4) -eq 4)
+    try
     {
-        $respLen = [BitConverter]::ToUInt32($lenBuf, 0)
-        if ($respLen -gt 0 -and $respLen -le 65536)
+        $buf = [byte[]]::new(4 + $cwdBytes.Length + 4 + $propsBytes.Length)
+        [BitConverter]::GetBytes([uint32]$cwdBytes.Length).CopyTo($buf, 0)
+        $cwdBytes.CopyTo($buf, 4)
+        [BitConverter]::GetBytes([uint32]$propsBytes.Length).CopyTo($buf, 4 + $cwdBytes.Length)
+        $propsBytes.CopyTo($buf, 4 + $cwdBytes.Length + 4)
+        $pipe.Write($buf, 0, $buf.Length)
+        $pipe.Flush()
+
+        $lenBuf = [byte[]]::new(4)
+        $result = $null
+        if ($pipe.Read($lenBuf, 0, 4) -eq 4)
         {
-            $respBuf = [byte[]]::new($respLen)
-            $read = 0
-            while ($read -lt $respLen)
+            $respLen = [BitConverter]::ToUInt32($lenBuf, 0)
+            if ($respLen -gt 0 -and $respLen -le 65536)
             {
-                $n = $pipe.Read($respBuf, $read, $respLen - $read)
-                if ($n -le 0)
-                { break 
+                $respBuf = [byte[]]::new($respLen)
+                $read = 0
+                while ($read -lt $respLen)
+                {
+                    $n = $pipe.Read($respBuf, $read, $respLen - $read)
+                    if ($n -le 0) { break }
+                    $read += $n
                 }
-                $read += $n
+                $result = [Text.Encoding]::UTF8.GetString($respBuf, 0, $read)
             }
-            $result = [Text.Encoding]::UTF8.GetString($respBuf, 0, $read)
         }
+        return $result
+    } catch
+    {
+        $script:DaemonPipe.Dispose()
+        $script:DaemonPipe = $null
+        return $null
     }
-    $pipe.Dispose()
-    return $result
 }
 
 function Disable-StarshipDaemon
 {
+    if ($null -ne $script:DaemonPipe)
+    {
+        $script:DaemonPipe.Dispose()
+        $script:DaemonPipe = $null
+    }
     Get-Process -Name starship-daemon -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
 }
@@ -104,11 +122,7 @@ function global:prompt
 
     try
     {
-        $keymap = if ([Microsoft.PowerShell.PSConsoleReadLine]::InViCommandMode())
-        { "vi" 
-        } else
-        { "emacs" 
-        }
+        $keymap = if ([Microsoft.PowerShell.PSConsoleReadLine]::InViCommandMode()) { "vi" } else { "emacs" }
         $exitCode = if ($lastCmdOk)
         { 0 
         } elseif ($origLastExitCode -ne 0)

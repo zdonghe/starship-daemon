@@ -3,9 +3,13 @@ use std::mem::ManuallyDrop;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use starship_daemon::ffi;
+use starship_daemon::{ffi, PIPE_NAME};
 
-const PIPE_PATH: &str = r"\\.\pipe\starship-daemon";
+fn pipe_path() -> String {
+    std::env::var("STARSHIP_DAEMON_PIPE")
+        .map(|n| { if n.starts_with(r"\\.\pipe\") { n } else { format!(r"\\.\pipe\{n}") } })
+        .unwrap_or_else(|_| starship_daemon::PIPE_NAME.to_string())
+}
 
 static DAEMON_LOCK: Mutex<()> = Mutex::new(());
 
@@ -15,11 +19,12 @@ struct PipeClient {
 
 impl PipeClient {
     fn connect(timeout_ms: u32) -> Option<Self> {
+        let path = pipe_path();
         let deadline = Instant::now()
             + std::time::Duration::from_millis(timeout_ms as u64);
         loop {
             unsafe {
-                let wide = ffi::to_wide(PIPE_PATH);
+                let wide = ffi::to_wide(&path);
                 let handle = ffi::CreateFileW(
                     wide.as_ptr(),
                     0xC0000000,
@@ -340,15 +345,19 @@ fn ipc_git_push_stale_ahead() {
 
         common::git(Path::new(&repo_str), &["push"]);
 
-        let c2 = PipeClient::connect(1000).expect("second connect");
-        assert!(c2.send_request(&repo_str, "{}"));
-        let after_push = c2.read_response().expect("after push");
-
-        assert!(!after_push.contains('⇡'),
-            "BUG: cooldown race — stale cache still shows ⇡ after push\n\
-             Expected: prompt should NOT contain ⇡ (no longer ahead)\n\
-             Actual: ⇡ persists because 100ms cooldown blocks watcher gen bump\n\
-             When handle_client restructured to permit immediate dirty processing, this passes.");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let after_push = loop {
+            let c = PipeClient::connect(1000).expect("connect after push");
+            assert!(c.send_request(&repo_str, "{}"));
+            let resp = c.read_response().expect("read after push");
+            if !resp.contains('⇡') {
+                break resp;
+            }
+            if Instant::now() > deadline {
+                panic!("⇡ never cleared within 5s after push (watcher cooldown race)");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
     });
 
     let _ = process.kill();

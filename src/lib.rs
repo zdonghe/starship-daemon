@@ -4,6 +4,12 @@ use std::sync::Mutex;
 
 pub const PIPE_NAME: &str = r"\\.\pipe\starship-daemon";
 
+pub fn pipe_name() -> String {
+    std::env::var("STARSHIP_DAEMON_PIPE").map(|n| {
+        if n.starts_with(r"\\.\pipe\") { n } else { format!(r"\\.\pipe\{n}") }
+    }).unwrap_or_else(|_| PIPE_NAME.to_string())
+}
+
 pub mod cache;
 pub mod ffi;
 pub mod watch;

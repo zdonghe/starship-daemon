@@ -197,55 +197,47 @@ pub fn render_cached(
     let tb = crate::cache::current_minute();
     let resolved_gd = git_dir.map(Path::to_path_buf);
 
-    // Path 1: Full hit — time_bucket matches
+    // Path 1: Full hit, time_bucket still current
     if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb) {
         return entry.rendered.clone();
     }
 
-    // Path 2: Time-only re-render — key exists, stale time_bucket
-    // No bust_dir, no populate_cache, just re-use cached segments
-    if let Some((key, mut entry)) = lru.pop_entry(&full_key) {
-
-        let (sctx, fmt) = prepare_and_resolve(resolved_gd.as_deref(), &ctx.cwd, ctx, config);
-        let r = get_prompt_with_cache(&sctx, &entry.segments, &fmt);
-        let rendered = trim_prompt(&r);
-        entry.rendered = rendered.clone();
-        entry.time_bucket = tb;
-        lru.put(key, entry);
-
-        if let Some(ref gd) = resolved_gd {
-            save_repo_cache(gd, sctx);
+    // Path 2: key exists but time_bucket is stale - reuse cached segments,
+    // re-render only the time module. No bust_dir, no populate_cache.
+    // Path 3: full miss - build fresh segments in a bust_dir.
+    let (key, current_dir, bust_dir, segments) = match lru.pop_entry(full_key) {
+        Some((key, entry)) => (key, ctx.cwd.clone(), None, Some(entry.segments)),
+        None => {
+            let (current_dir, bust_dir) = match resolved_gd {
+                Some(ref gd) => {
+                    let bust = make_bust_dir(gd);
+                    (bust.clone(), Some(bust))
+                }
+                None => (ctx.cwd.clone(), None),
+            };
+            (full_key.clone(), current_dir, bust_dir, None)
         }
-
-        return rendered;
-    }
-
-    // Path 3: Full miss — bust_dir + populate_cache
-
-    let (current_dir, bust_dir) = match resolved_gd {
-        Some(ref gd) => {
-            let bust = make_bust_dir(gd);
-            (bust.clone(), Some(bust))
-        }
-        None => (ctx.cwd.clone(), None),
     };
 
     let (sctx, fmt) = prepare_and_resolve(resolved_gd.as_deref(), &current_dir, ctx, config);
-    let mut module_cache = ModuleCache::new();
-    populate_cache(&sctx, &fmt, &mut module_cache);
-    let rendered = get_prompt_with_cache(&sctx, &module_cache, &fmt);
-    let rendered = trim_prompt(&rendered);
-    lru.put(full_key.clone(), CachedValue {
-        rendered: rendered.clone(),
-        segments: module_cache,
-        time_bucket: tb,
-    });
+    let segments = match segments {
+        Some(seg) => seg,
+        None => {
+            let mut seg = ModuleCache::new();
+            populate_cache(&sctx, &fmt, &mut seg);
+            seg
+        }
+    };
+    let rendered = trim_prompt(&get_prompt_with_cache(&sctx, &segments, &fmt));
+    lru.put(key, CachedValue { rendered: rendered.clone(), segments, time_bucket: tb });
 
     if let Some(ref gd) = resolved_gd {
         save_repo_cache(gd, sctx);
     }
 
-    if let Some(dir) = bust_dir { let _ = std::fs::remove_dir_all(dir); }
+    if let Some(dir) = bust_dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
     rendered
 }
 

@@ -56,8 +56,7 @@ pub fn is_ignored_str(ig: &GitignoreFilter, event_path: &str) -> bool {
     for rule in &ig.rules {
         if rule.dir_only { continue; }
         if path_match(&rule.parts, &path_comps, rule.anchored) {
-            if rule.negate { result = false; }
-            else { result = true; }
+            result = !rule.negate;
         }
     }
 

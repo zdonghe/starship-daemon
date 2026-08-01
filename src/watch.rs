@@ -1,6 +1,9 @@
 use std::ffi::c_void;
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use crate::ffi::{self, HANDLE, DWORD, LPVOID};
 use crate::gitignore::{GitignoreFilter, load_gitignore, is_ignored_str};
@@ -20,7 +23,145 @@ const CHANGE_BUF_SIZE: u32 = 65536;
 // Max concurrently watched repos. The daemon's wait set is the session events
 // (MAX_SESSIONS in main.rs) plus MAX_WATCHED_REPOS watcher events; must stay
 // under MAXIMUM_WAIT_OBJECTS (64), enforced by a compile-time assert in main.rs.
-pub const MAX_WATCHED_REPOS: usize = 48;
+pub const MAX_WATCHED_REPOS: usize = 16;
+
+// Overhead measurement for the watcher. All collection is gated by
+// STARSHIP_WATCH_STATS (STATS_ENABLED, set in main.rs): with it unset, the hot
+// path costs only a couple of relaxed atomic loads per call and never samples
+// the clock or locks the Mutex-protected accumulators. Single-threaded daemon,
+// so relaxed atomics are sufficient; only the drain thread races.
+pub struct RepoStat {
+    pub repo: PathBuf,
+    pub completions: u64,
+    pub dropped_git_internal: u64,
+    pub dropped_gitignored: u64,
+}
+
+pub struct WatcherStats {
+    pub wakes: AtomicU64,
+    pub sweep_checks: AtomicU64,
+    pub completions: AtomicU64,
+    pub records: AtomicU64,
+    pub reloads: AtomicU64,
+    pub re_arms: AtomicU64,
+    pub bumps: AtomicU64,
+    pub ensures: AtomicU64,
+    pub evictions: AtomicU64,
+    pub nanos_sweep: AtomicU64,
+    pub nanos_handle_event: AtomicU64,
+    pub nanos_parse: AtomicU64,
+    pub nanos_filter: AtomicU64,
+    pub nanos_rearm: AtomicU64,
+    pub nanos_reload: AtomicU64,
+    pub nanos_flush: AtomicU64,
+    pub nanos_ensure: AtomicU64,
+    pub nanos_version: AtomicU64,
+    pub per_repo: Mutex<Vec<RepoStat>>,
+    pub dropped_samples: Mutex<Vec<String>>,
+}
+
+impl WatcherStats {
+    pub const fn new() -> Self {
+        WatcherStats {
+            wakes: AtomicU64::new(0),
+            sweep_checks: AtomicU64::new(0),
+            completions: AtomicU64::new(0),
+            records: AtomicU64::new(0),
+            reloads: AtomicU64::new(0),
+            re_arms: AtomicU64::new(0),
+            bumps: AtomicU64::new(0),
+            ensures: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+            nanos_sweep: AtomicU64::new(0),
+            nanos_handle_event: AtomicU64::new(0),
+            nanos_parse: AtomicU64::new(0),
+            nanos_filter: AtomicU64::new(0),
+            nanos_rearm: AtomicU64::new(0),
+            nanos_reload: AtomicU64::new(0),
+            nanos_flush: AtomicU64::new(0),
+            nanos_ensure: AtomicU64::new(0),
+            nanos_version: AtomicU64::new(0),
+            per_repo: Mutex::new(Vec::new()),
+            dropped_samples: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+pub static STATS: WatcherStats = WatcherStats::new();
+
+// Enables clock sampling and Mutex-protected accumulation. Set from main.rs
+// when STARSHIP_WATCH_STATS is present; the drain thread only spawns then.
+pub static STATS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+fn stats_on() -> bool {
+    STATS_ENABLED.load(Ordering::Relaxed)
+}
+
+fn stats_timer(on: bool) -> Option<Instant> {
+    on.then(Instant::now)
+}
+
+fn repo_stats(repo: &Path, completions: u64, internal: u64, ignored: u64) {
+    let mut m = STATS.per_repo.lock().unwrap();
+    if let Some(s) = m.iter_mut().find(|s| s.repo == repo) {
+        s.completions += completions;
+        s.dropped_git_internal += internal;
+        s.dropped_gitignored += ignored;
+    } else {
+        m.push(RepoStat {
+            repo: repo.to_path_buf(),
+            completions,
+            dropped_git_internal: internal,
+            dropped_gitignored: ignored,
+        });
+        if m.len() > 64 {
+            m.remove(0);
+        }
+    }
+}
+
+pub fn drain_stats() -> String {
+    fn take(a: &AtomicU64) -> u64 {
+        a.swap(0, Ordering::Relaxed)
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "counters: wakes={} sweep_checks={} completions={} records={} reloads={} rearms={} bumps={} ensures={} evictions={}\n",
+        take(&STATS.wakes), take(&STATS.sweep_checks), take(&STATS.completions),
+        take(&STATS.records), take(&STATS.reloads), take(&STATS.re_arms),
+        take(&STATS.bumps), take(&STATS.ensures), take(&STATS.evictions),
+    ));
+    out.push_str(&format!(
+        "us: sweep={:.1} handle_event={:.1} parse={:.1} filter={:.1} rearm={:.1} reload={:.1} flush={:.1} ensure={:.1} version={:.1}\n",
+        take(&STATS.nanos_sweep) as f64 / 1000.0,
+        take(&STATS.nanos_handle_event) as f64 / 1000.0,
+        take(&STATS.nanos_parse) as f64 / 1000.0,
+        take(&STATS.nanos_filter) as f64 / 1000.0,
+        take(&STATS.nanos_rearm) as f64 / 1000.0,
+        take(&STATS.nanos_reload) as f64 / 1000.0,
+        take(&STATS.nanos_flush) as f64 / 1000.0,
+        take(&STATS.nanos_ensure) as f64 / 1000.0,
+        take(&STATS.nanos_version) as f64 / 1000.0,
+    ));
+    let per_repo = {
+        let mut m = STATS.per_repo.lock().unwrap();
+        std::mem::take(&mut *m)
+    };
+    for r in per_repo {
+        out.push_str(&format!(
+            "  repo {:?}: completions={} dropped_internal={} dropped_ignored={}\n",
+            r.repo, r.completions, r.dropped_git_internal, r.dropped_gitignored,
+        ));
+    }
+    let samples = {
+        let mut m = STATS.dropped_samples.lock().unwrap();
+        std::mem::take(&mut *m)
+    };
+    for s in samples {
+        out.push_str(&format!("  dropped: {s}\n"));
+    }
+    out
+}
 
 fn ol_ptr(ol: &mut ffi::OVERLAPPED) -> *mut c_void {
     ol as *mut _ as *mut c_void
@@ -109,6 +250,16 @@ impl WatcherState {
     }
 
     pub fn version(&self, repo_root: &Path) -> u64 {
+        let on = stats_on();
+        let t = stats_timer(on);
+        let v = self.version_inner(repo_root);
+        if let Some(x) = t {
+            STATS.nanos_version.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        v
+    }
+
+    fn version_inner(&self, repo_root: &Path) -> u64 {
         for e in &self.entries {
             if e.repo_root == repo_root { return e.version; }
         }
@@ -116,6 +267,16 @@ impl WatcherState {
     }
 
     pub fn ensure(&mut self, repo_root: &Path) {
+        let on = stats_on();
+        let t = stats_timer(on);
+        self.ensure_inner(repo_root);
+        if let Some(x) = t {
+            STATS.ensures.fetch_add(1, Ordering::Relaxed);
+            STATS.nanos_ensure.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    fn ensure_inner(&mut self, repo_root: &Path) {
         // Touch an existing entry; re-arm a dead one. A revived watch must
         // force one bump to cover changes that landed while it was dead, and a
         // failed re-arm bumps too so the entry stays fresh rather than frozen.
@@ -186,10 +347,14 @@ impl WatcherState {
             }
         }
         self.entries.swap_remove(victim);
+        if stats_on() { STATS.evictions.fetch_add(1, Ordering::Relaxed); }
     }
 
     pub fn handle_event(&mut self, idx: usize) {
         if idx >= self.entries.len() { return; }
+        let on = stats_on();
+        let t = stats_timer(on);
+        if on { STATS.completions.fetch_add(1, Ordering::Relaxed); }
         let changed = {
             let we = &mut self.entries[idx];
             let mut bytes: DWORD = 0;
@@ -201,7 +366,12 @@ impl WatcherState {
                     true
                 } else {
                     let len = (bytes as usize).min(we.change_buf.len());
+                    let pt = stats_timer(on);
                     let paths = extract_watcher_paths(&we.change_buf[..len]);
+                    if let Some(x) = pt {
+                        STATS.nanos_parse.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        STATS.records.fetch_add(paths.len() as u64, Ordering::Relaxed);
+                    }
                     // Reload the ignore filter when this batch touches
                     // .gitignore. Check BEFORE filtering: the old filter may
                     // itself ignore .gitignore and would otherwise suppress the
@@ -211,20 +381,43 @@ impl WatcherState {
                         if path == ".gitignore" { reload = true; break; }
                     }
                     if reload {
+                        let rt = stats_timer(on);
                         we.ignore = load_gitignore(&we.repo_root);
+                        if let Some(x) = rt {
+                            STATS.reloads.fetch_add(1, Ordering::Relaxed);
+                            STATS.nanos_reload.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
                     }
+                    let mut internal = 0u64;
+                    let mut ignored = 0u64;
+                    let mut visible = false;
                     // A reload is itself a visible change even when the new
                     // rules filter .gitignore out of this batch (e.g. a `*`
                     // rule): without this the new rules would be cached with
                     // no bump and the old ones kept forever.
-                    let matches = paths.iter().any(|(path, _)| {
-                        if is_git_internal(path) { return false; }
-                        if let Some(ref ig) = we.ignore {
-                            if is_ignored_str(ig, path) { return false; }
+                    for (path, _) in &paths {
+                        if is_git_internal(path) {
+                            internal += 1;
+                        } else if let Some(ref ig) = we.ignore {
+                            if is_ignored_str(ig, path) {
+                                ignored += 1;
+                                if on {
+                                    let mut sp = STATS.dropped_samples.lock().unwrap();
+                                    if sp.len() < 5 { sp.push(path.clone()); }
+                                }
+                            } else {
+                                visible = true;
+                            }
+                        } else {
+                            visible = true;
                         }
-                        true
-                    });
-                    reload || matches
+                    }
+                    let ft = stats_timer(on);
+                    if let Some(x) = ft {
+                        STATS.nanos_filter.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                    if on { repo_stats(&we.repo_root, paths.len() as u64, internal, ignored); }
+                    reload || visible
                 }
             } else {
                 // Errored completion (e.g. ERROR_NOTIFY_ENUM_DIR on kernel
@@ -232,22 +425,36 @@ impl WatcherState {
                 // a change to avoid a stale cache with no self-heal.
                 true
             };
+            let st = stats_timer(on);
             let start_ok = start_watch(we);
+            if let Some(x) = st {
+                STATS.nanos_rearm.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                if start_ok { STATS.re_arms.fetch_add(1, Ordering::Relaxed); }
+            }
             we.armed = start_ok;
             changed || !start_ok
         };
         if changed {
             self.entries[idx].pending = true;
         }
+        if let Some(x) = t {
+            STATS.nanos_handle_event.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
     }
 
     pub fn flush(&mut self) {
+        let on = stats_on();
+        let t = stats_timer(on);
         for e in &mut self.entries {
             if e.pending {
                 e.pending = false;
                 e.version = self.epoch;
                 self.epoch += 1;
+                if on { STATS.bumps.fetch_add(1, Ordering::Relaxed); }
             }
+        }
+        if let Some(x) = t {
+            STATS.nanos_flush.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     }
 
@@ -257,10 +464,17 @@ impl WatcherState {
     }
 
     pub fn process_signaled(&mut self) {
+        let on = stats_on();
+        let t = stats_timer(on);
         for i in 0..self.entries.len() {
+            if on { STATS.sweep_checks.fetch_add(1, Ordering::Relaxed); }
             if unsafe { ffi::WaitForSingleObject(self.entries[i].change_event, 0) } == ffi::WAIT_OBJECT_0 {
+                if on { STATS.wakes.fetch_add(1, Ordering::Relaxed); }
                 self.handle_event(i);
             }
+        }
+        if let Some(x) = t {
+            STATS.nanos_sweep.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     }
 
@@ -699,12 +913,12 @@ mod tests {
         }
         let pre = w.version(&a);
         assert!(pre > 60, "60 flushes must push the version past 60, got {pre}");
-        for i in 0..48 {
+        for i in 0..MAX_WATCHED_REPOS {
             let r = dir.path().join(format!("r{i}"));
             std::fs::create_dir_all(&r).unwrap();
             w.ensure(&r);
         }
-        assert_eq!(w.version(&a), 0, "repo must be evicted after 48 more repos");
+        assert_eq!(w.version(&a), 0, "repo must be evicted after MAX_WATCHED_REPOS more repos");
         w.ensure(&a);
         assert!(w.version(&a) > pre, "re-ensured version must exceed every prior version");
     }

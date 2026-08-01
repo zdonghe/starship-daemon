@@ -8,7 +8,7 @@ use std::ffi::c_void;
 use lru::LruCache;
 use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::ffi::{self, HANDLE, DWORD, LPVOID, LPCVOID};
-use starship_daemon::watch::{WatcherState, MAX_WATCHED_REPOS};
+use starship_daemon::watch::{WatcherState, MAX_WATCHED_REPOS, STATS_ENABLED, drain_stats};
 use starship_daemon::{ParsedRequest, parse_request};
 
 const PIPE_ACCESS_DUPLEX: DWORD = 3;
@@ -20,7 +20,7 @@ const ERROR_IO_PENDING: DWORD = 997;
 const PIPE_READMODE_BYTE: DWORD = 0;
 // 9 pipe instances: at most 8 serve an active client at once. The moment a 9th
 // connects we evict the least-recently-active session, so one instance is always
-// free for a queued client. 9 sessions + 48 watcher handles = 57 <= 64.
+// free for a queued client. 9 sessions + 16 watcher handles = 25 <= 64.
 //
 // Trade-off vs. a timer-based idle reap: a connected-but-silent client now holds
 // its slot (and its ~36 KiB buffers) until 9-way contention, and evicting a
@@ -368,6 +368,14 @@ fn main() {
 
     for s in &mut sessions { rearm_connect(s); }
     println!("starship-daemon started on {}", pipe_name);
+
+    if std::env::var("STARSHIP_WATCH_STATS").is_ok() {
+        STATS_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            eprintln!("[watcher-stats]\n{}", drain_stats());
+        });
+    }
 
     {
         let warm_ctx = RenderContext {

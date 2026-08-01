@@ -64,21 +64,25 @@ pub fn is_ignored_str(ig: &GitignoreFilter, event_path: &str) -> bool {
 }
 
 pub fn component_match(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let n: Vec<char> = name.chars().collect();
+    fn match_rec(p: &str, n: &str) -> bool {
+        if p.is_empty() {
+            return n.is_empty();
+        }
+        if n.is_empty() {
+            return p.bytes().all(|b| b == b'*');
+        }
 
-    fn match_rec(p: &[char], n: &[char]) -> bool {
-        if p.is_empty() { return n.is_empty(); }
-        if n.is_empty() { return p.iter().all(|&c| c == '*'); }
-
-        match p[0] {
+        let pc = p.chars().next().unwrap();
+        match pc {
             '*' => {
-                match_rec(&p[1..], n) || match_rec(p, &n[1..])
+                match_rec(&p[pc.len_utf8()..], n)
+                    || match_rec(p, &n[n.chars().next().unwrap().len_utf8()..])
             }
-            '?' => match_rec(&p[1..], &n[1..]),
+            '?' => match_rec(&p[pc.len_utf8()..], &n[n.chars().next().unwrap().len_utf8()..]),
             c => {
-                if c == n[0] {
-                    match_rec(&p[1..], &n[1..])
+                let nc = n.chars().next().unwrap();
+                if c == nc {
+                    match_rec(&p[pc.len_utf8()..], &n[nc.len_utf8()..])
                 } else {
                     false
                 }
@@ -86,7 +90,7 @@ pub fn component_match(pattern: &str, name: &str) -> bool {
         }
     }
 
-    match_rec(&p, &n)
+    match_rec(pattern, name)
 }
 
 pub fn path_match(parts: &[String], path_comps: &[&str], anchored: bool) -> bool {
@@ -222,6 +226,27 @@ mod tests {
     #[test]
     fn component_match_only_star() {
         assert!(component_match("*", "anything"));
+    }
+
+    #[test]
+    fn component_match_multibyte() {
+        assert!(component_match("*.txt", "数据.txt"));
+        assert!(component_match("数据*.txt", "数据导出.txt"));
+        assert!(component_match("?.txt", "数.txt"));
+        assert!(component_match("?数据?", "A数据B"));
+        assert!(component_match("*数据", "x数据"));
+        assert!(!component_match("?.txt", "数据.txt"));
+        assert!(!component_match("?数据?", "AB"));
+    }
+
+    #[test]
+    fn mixed_negate_last_match_wins() {
+        let ig = mkfilter(vec![
+            mkrulen("*.log", false, false, false),
+            mkrulen("!important.log", true, false, false),
+        ]);
+        assert!(is_ignored_path(&ig, "debug.log"));
+        assert!(!is_ignored_path(&ig, "important.log"));
     }
 
     #[test]

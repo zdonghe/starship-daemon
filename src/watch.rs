@@ -17,8 +17,9 @@ const FILE_NOTIFY_CHANGE_DIR_NAME: DWORD = 2;
 const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
 const CHANGE_BUF_SIZE: u32 = 65536;
 
-// Max concurrently watched repos. The daemon's wait set is 8 session events +
-// MAX_WATCHED_REPOS watcher events; must stay under MAXIMUM_WAIT_OBJECTS (64).
+// Max concurrently watched repos. The daemon's wait set is the session events
+// (MAX_SESSIONS in main.rs) plus MAX_WATCHED_REPOS watcher events; must stay
+// under MAXIMUM_WAIT_OBJECTS (64), enforced by a compile-time assert in main.rs.
 pub const MAX_WATCHED_REPOS: usize = 48;
 
 fn ol_ptr(ol: &mut ffi::OVERLAPPED) -> *mut c_void {

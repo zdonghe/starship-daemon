@@ -145,8 +145,6 @@ impl DaemonProcess {
 
         let mut process = std::process::Command::new(&daemon_exe)
             .env("STARSHIP_CONFIG", &config_path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("failed to spawn daemon");
 
@@ -734,5 +732,62 @@ fn ipc_firehose_client_does_not_starve_others() {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(served, Some(true),
             "daemon starved B while A streamed continuously (firehose self-wake)");
+    });
+}
+
+#[test]
+fn lru_eviction_rotates_slot_at_capacity() {
+    // 9 pipe instances: at most 8 serve an active client. The moment a 9th
+    // connects, the least-recently-active session is evicted so a free instance
+    // always remains for a queued client. The 9th must connect immediately (no
+    // idle bound), and the evicted LRU's handle must break.
+    // All client work stays inside the closure: PipeClient{handle: *mut c_void}
+    // is not Send, so it cannot cross the with_hard_timeout thread boundary.
+    with_daemon(|| {
+        let result = with_hard_timeout(8000, || {
+            let mut clients = Vec::new();
+            for i in 0..8 {
+                let Some(c) = PipeClient::connect(1000) else { eprintln!("connect {i} failed"); return None; };
+                clients.push(c);
+            }
+            // Round-trip a request through each client in order so the daemon's
+            // last_activity stamps are strictly ordered (each completes before the
+            // next): clients[0] is the oldest and is the deterministic LRU victim.
+            for i in 0..8 {
+                if !clients[i].send_request(r"C:\", "{}") || clients[i].read_response_timeout(5000).is_none() {
+                    eprintln!("round-trip client {i} failed");
+                    return None;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+
+            let start = Instant::now();
+            let Some(ninth) = PipeClient::connect(3000) else { eprintln!("connect 9th failed"); return None; };
+            let elapsed = start.elapsed();
+            let serviced = ninth.send_request(r"C:\", "{}")
+                && ninth.read_response_timeout(5000).is_some();
+            let lru_evicted = !clients[0].send_request(r"C:\", "{}");
+            let others_alive = (1..8).all(|i| clients[i].send_request(r"C:\", "{}")
+                && clients[i].read_response_timeout(5000).is_some());
+
+            // A fresh instance must be listening after the eviction: a 10th
+            // client connects immediately and is served.
+            let tenth_served = PipeClient::connect(3000)
+                .map(|c| c.send_request(r"C:\", "{}") && c.read_response_timeout(5000).is_some())
+                .unwrap_or(false);
+            Some((elapsed, serviced, lru_evicted, others_alive, tenth_served))
+        }).flatten();
+
+        match result {
+            Some((elapsed, serviced, lru_evicted, others_alive, tenth_served)) => {
+                assert!(elapsed < Duration::from_secs(3),
+                    "9th client must connect immediately via the free instance, took {elapsed:?}");
+                assert!(serviced, "9th client must be serviced");
+                assert!(lru_evicted, "the LRU session must be disconnected to free the instance");
+                assert!(others_alive, "a non-LRU session must survive and still be served");
+                assert!(tenth_served, "a fresh instance must be listening after eviction (10th client served)");
+            }
+            None => panic!("connect or service path failed within 8s"),
+        }
     });
 }

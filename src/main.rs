@@ -18,11 +18,22 @@ const PIPE_WAIT: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
 const ERROR_IO_PENDING: DWORD = 997;
 const PIPE_READMODE_BYTE: DWORD = 0;
-const MAX_SESSIONS: usize = 8;
-const MAX_IDLE_MS: u128 = 5000;
+// 9 pipe instances: at most 8 serve an active client at once. The moment a 9th
+// connects we evict the least-recently-active session, so one instance is always
+// free for a queued client. 9 sessions + 48 watcher handles = 57 <= 64.
+//
+// Trade-off vs. a timer-based idle reap: a connected-but-silent client now holds
+// its slot (and its ~36 KiB buffers) until 9-way contention, and evicting a
+// session breaks that connection (the client reconnects on its next prompt).
+// Both are bounded by the 9-instance cap and self-heal under pressure.
+const MAX_SESSIONS: usize = 9;
 const MAX_REQS_PER_WAKE: u32 = 8;
 const BUF_SIZE: usize = 4 + 32768 + 4 + 4096;
-const IDLE_SWEEP_MS: DWORD = 1000;
+
+// The wait set shares MAXIMUM_WAIT_OBJECTS (64); the session events and watcher
+// change events are the only handles in it. Compile-time guard against silent
+// WAIT_FAILED busy-spinning if either cap is ever raised.
+const _: () = assert!(MAX_SESSIONS + MAX_WATCHED_REPOS <= 64);
 
 #[derive(Clone, Copy)]
 enum ReadStage {
@@ -375,20 +386,20 @@ fn main() {
     let mut handles = Vec::with_capacity(MAX_SESSIONS + MAX_WATCHED_REPOS);
 
     loop {
-        let now = Instant::now();
-        for s in &mut sessions {
-            if s.active && now.duration_since(s.last_activity).as_millis() > MAX_IDLE_MS {
-                disconnect_session(s);
-            }
-        }
         for s in &sessions { handles.push(s.event); }
         for i in 0..watcher.num_entries() { handles.push(watcher.change_event(i)); }
-        // Sleep until a connect, a watcher completion, or (only while a session
-        // is active) a periodic tick that reaps stalled clients. With no active
-        // sessions the daemon blocks indefinitely - no polling.
-        let timeout: DWORD = if sessions.iter().any(|s| s.active) { IDLE_SWEEP_MS } else { ffi::INFINITE };
+        // Fully event-driven: no periodic tick. A connect, a client write, or a
+        // watcher completion all wake the daemon via events.
         let total = handles.len() as DWORD;
-        let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, timeout) };
+        let rc = unsafe { ffi::WaitForMultipleObjects(total, handles.as_ptr(), 0, ffi::INFINITE) };
+        if rc == ffi::WAIT_FAILED {
+            // Should be unreachable (budget enforced by the const assert above),
+            // but fail loudly instead of busy-spinning the loop.
+            eprintln!("starship-daemon: WaitForMultipleObjects failed (GetLastError={})", unsafe { ffi::GetLastError() });
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            handles.clear();
+            continue;
+        }
         watcher.process_signaled();
         if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
             // Service every signaled session, not just the lowest-index one.
@@ -409,6 +420,19 @@ fn main() {
                         IssueOutcome::Pending => {}
                         IssueOutcome::Error => disconnect_session(s),
                     }
+                }
+            }
+            // Eager slot rotation: a 9th active session is transient. Evict the
+            // least-recently-active session so a free instance always remains for
+            // a queued client. Connect-driven (this very iteration serviced the
+            // connect), never a timer.
+            if sessions.iter().filter(|s| s.active).count() >= MAX_SESSIONS {
+                if let Some(i) = sessions.iter().enumerate()
+                    .filter(|(_, s)| s.active)
+                    .min_by_key(|(_, s)| s.last_activity)
+                    .map(|(i, _)| i)
+                {
+                    disconnect_session(&mut sessions[i]);
                 }
             }
         }

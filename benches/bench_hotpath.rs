@@ -34,13 +34,14 @@ fn main() {
     println!("(warm-up render done)\n");
 
     // ---------- cache hit: LruCache::get ----------
-    let key = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, 0);
+    let key = cache::compute_cache_key(&cwd, "viins", 120, 0, 0);
     let rendered = "dummy".to_string();
     let segments = starship::print::ModuleCache::new();
     let cached = CachedValue {
         rendered,
         segments,
         time_bucket: cache::current_minute(),
+        status_code: 0,
     };
     let mut lru: LruCache<CacheKey, CachedValue> = LruCache::new(NonZeroUsize::new(256).unwrap());
     lru.put(key.clone(), cached);
@@ -54,7 +55,7 @@ fn main() {
     // ---------- cache key computation ----------
     let n = 100;
     let start = Instant::now();
-    for _ in 0..n { let _ = cache::compute_cache_key(&cwd, 0, "viins", 120, 0, 0); }
+    for _ in 0..n { let _ = cache::compute_cache_key(&cwd, "viins", 120, 0, 0); }
     let key_us = start.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
     println!("  compute_cache_key (2 stats):         {:>8.1} us", key_us);
 

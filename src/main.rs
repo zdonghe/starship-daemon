@@ -328,7 +328,7 @@ fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cac
     } else {
         0
     };
-    let ck = cache::compute_cache_key(&cwd, status_code, &keymap, tw, cur_cfg_mtime, watcher_version);
+    let ck = cache::compute_cache_key(&cwd, &keymap, tw, cur_cfg_mtime, watcher_version);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
     let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);
@@ -385,7 +385,7 @@ fn main() {
             keymap: "vi".to_string(),
         };
         let warm_key = cache::compute_cache_key(
-            Path::new("."), 0, "vi", 120, 0, 0,
+            Path::new("."), "vi", 120, 0, 0,
         );
         let _ = cache::render_cached(&warm_ctx, None, &cached_config, &warm_key, &mut lru);
     }

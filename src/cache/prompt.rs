@@ -22,6 +22,7 @@ pub struct CachedValue {
     pub rendered: String,
     pub segments: ModuleCache,
     pub time_bucket: u64,
+    pub status_code: i32,
 }
 
 struct RepoCache {
@@ -128,7 +129,8 @@ fn populate_cache(
     };
 
     for module in formatter.get_variables() {
-        if module == "all" || module == "time" || context.is_module_disabled_in_config(&module) || cache.contains_key(&module) {
+        if module == "all" || module == "time" || module == "status" || module == "character"
+            || context.is_module_disabled_in_config(&module) || cache.contains_key(&module) {
             continue;
         }
         if let Some(segments) = starship::print::get_module_segments(&module, context) {
@@ -193,13 +195,20 @@ pub fn render_cached(
     let tb = crate::cache::current_minute();
     let resolved_gd = git_dir.map(Path::to_path_buf);
 
-    // Path 1: Full hit, time_bucket still current
-    if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb) {
+    // Path 1: Full hit, time_bucket still current and exit code unchanged.
+    // status_code is deliberately outside the cache key and gated here instead
+    // (like time_bucket): the `status`/`character` modules are re-rendered live
+    // on Path 2. This gate is what keeps their cached output fresh. If the wire
+    // protocol ever gains another per-request render input (pipestatus, jobs,
+    // shlvl are read by status.rs/jobs.rs/shlvl.rs), it must be gated here and
+    // its consuming modules skipped in populate_cache too, or it goes stale.
+    if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb && e.status_code == ctx.status_code) {
         return entry.rendered.clone();
     }
 
-    // Path 2: key exists but time_bucket is stale - reuse cached segments,
-    // re-render only the time module. No bust_dir, no populate_cache.
+    // Path 2: key exists but time_bucket or status_code is stale - reuse cached
+    // segments, re-render only the time/status/character modules. No bust_dir,
+    // no populate_cache.
     // Path 3: full miss - build fresh segments in a bust_dir.
     let (key, current_dir, bust_dir, segments) = match lru.pop_entry(full_key) {
         Some((key, entry)) => (key, ctx.cwd.clone(), None, Some(entry.segments)),
@@ -225,7 +234,7 @@ pub fn render_cached(
         }
     };
     let rendered = trim_prompt(&get_prompt_with_cache(&sctx, &segments, &fmt));
-    lru.put(key, CachedValue { rendered: rendered.clone(), segments, time_bucket: tb });
+    lru.put(key, CachedValue { rendered: rendered.clone(), segments, time_bucket: tb, status_code: ctx.status_code });
 
     if let Some(ref gd) = resolved_gd {
         save_repo_cache(gd, sctx);
@@ -339,7 +348,7 @@ mod tests {
             [character]
             format = ">"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
+        let key = compute_cache_key(cwd.path(), "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let expected = render_prompt_with_config(&ctx, None, &cfg);
@@ -374,7 +383,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
+        let key = compute_cache_key(cwd.path(), "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let full = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -395,16 +404,18 @@ mod tests {
             cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "vi".to_string(),
         };
         let cfg = toml::toml! {
-            format = "$character$time"
+            format = "$character$directory$time"
             add_newline = false
             [character]
             format = "> "
+            [directory]
+            disabled = false
             [time]
             disabled = false
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
+        let key = compute_cache_key(cwd.path(), "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _ = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -412,8 +423,10 @@ mod tests {
         let (_, entry) = lru.pop_entry(&key).unwrap();
         assert!(!entry.segments.contains_key("time"),
             "populate_cache must skip 'time' module, but time segments found in cache");
-        assert!(entry.segments.contains_key("character"),
-            "populate_cache must include non-time modules, but character missing from cache");
+        assert!(!entry.segments.contains_key("character"),
+            "populate_cache must skip 'character' module, but character segments found in cache");
+        assert!(entry.segments.contains_key("directory"),
+            "populate_cache must include stable modules, but directory missing from cache");
     }
 
     #[test]
@@ -449,7 +462,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
+        let key = compute_cache_key(cwd.path(), "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _full = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -486,7 +499,7 @@ mod tests {
             format = "[$time](bold yellow)"
             time_format = "%H:%M"
         };
-        let key = compute_cache_key(cwd.path(), 0, "vi", 120, 0, 0);
+        let key = compute_cache_key(cwd.path(), "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
@@ -495,8 +508,9 @@ mod tests {
         // Snapshot segments after full render (Path 3)
         let (_, before) = lru.pop_entry(&key).unwrap();
         let segment_keys: Vec<String> = before.segments.keys().cloned().collect();
-        assert!(segment_keys.contains(&"character".to_string()));
         assert!(segment_keys.contains(&"directory".to_string()));
+        assert!(!segment_keys.contains(&"character".to_string()),
+            "character must not appear in cached segments (re-rendered live)");
         assert!(!segment_keys.contains(&"time".to_string()));
         lru.put(key.clone(), before);
 
@@ -519,6 +533,98 @@ mod tests {
                 "time_bucket must be updated after re-render {i}");
             lru.put(key.clone(), check);
         }
+    }
+
+    #[test]
+    fn render_cached_status_code_isolation() {
+        // Clear any repo-cache entry left by a prior test (or a failed run of
+        // this one) before we populate the fake-git_dir entry below.
+        clear_repo_cache();
+        let cwd = tempfile::TempDir::new().unwrap();
+        // Plain tempdir as a fake git_dir: render_cached never falls back to
+        // find_git_dir, and a bust dir (which bumps BUST_COUNTER) is made only
+        // on a full Path-3 miss, so the counter delta is a direct signal for
+        // "segments were reused, not rebuilt".
+        let gd = tempfile::TempDir::new().unwrap();
+        let cfg = toml::toml! {
+            format = "$character$status$directory"
+            add_newline = false
+            [character]
+            success_symbol = "C-OK"
+            error_symbol = "C-ERR"
+            [status]
+            disabled = false
+            format = "[$symbol$status]($style)"
+            success_symbol = "OK"
+            symbol = "ERR"
+            [directory]
+            disabled = false
+        };
+        // keymap "" is deliberate: "vi" maps to ShellEditMode::Normal and
+        // character.rs uses vimcmd_symbol, bypassing success/error_symbol and
+        // voiding the symbols assertions.
+        let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
+        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
+
+        let ctx0 = RenderContext {
+            cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 0, keymap: "".to_string(),
+        };
+        let ctx1 = RenderContext {
+            cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 1, keymap: "".to_string(),
+        };
+
+        // Reset the shared bust counter so this test is hermetic regardless of
+        // prior busts; the assertions below are deltas against `base`.
+        BUST_COUNTER.store(0, Ordering::Relaxed);
+        let base = BUST_COUNTER.load(Ordering::Relaxed);
+
+        let r0 = render_cached(&ctx0, Some(gd.path()), &cfg, &key, &mut lru);
+        assert!(r0.contains("C-OK"), "status 0 character must use success symbol, got: {r0}");
+        assert!(r0.contains("OK0"), "status 0 module must show OK + 0, got: {r0}");
+        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
+            "first full miss (Path 3) must make exactly one bust dir");
+        let (_, e0) = lru.pop_entry(&key).unwrap();
+        assert_eq!(e0.status_code, 0);
+        assert!(e0.segments.contains_key("directory"),
+            "stable module must be cached on full render");
+        assert!(!e0.segments.contains_key("character"));
+        assert!(!e0.segments.contains_key("status"),
+            "status module must be excluded from cached segments");
+        lru.put(key.clone(), e0);
+
+        let r1 = render_cached(&ctx1, Some(gd.path()), &cfg, &key, &mut lru);
+        assert!(r1.contains("C-ERR"), "status 1 character must use error symbol, got: {r1}");
+        assert!(r1.contains("ERR1"), "status 1 module must show ERR + 1, got: {r1}");
+        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
+            "exit-code change must reuse segments (Path 2), not make a bust dir");
+        let (_, e1) = lru.pop_entry(&key).unwrap();
+        assert_eq!(e1.status_code, 1, "cached status must be refreshed");
+        assert!(e1.segments.contains_key("directory"),
+            "directory segment must survive the exit-code change");
+        assert!(!e1.segments.contains_key("character"));
+        assert!(!e1.segments.contains_key("status"));
+        lru.put(key.clone(), e1);
+
+        // r2 is a consistency check, not a Path-1 proof: identical output and
+        // a zero bust delta hold for both Path 1 and Path 2. The gate's failing
+        // direction is proven by r1's content (C-ERR after status 0 cached) and
+        // r3's C-OK return on the 1->0 transition.
+        let r2 = render_cached(&ctx1, Some(gd.path()), &cfg, &key, &mut lru);
+        assert_eq!(r1, r2, "same status must hit Path 1 verbatim");
+        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
+            "same-status hit (Path 1) must not make a bust dir");
+
+        let r3 = render_cached(&ctx0, Some(gd.path()), &cfg, &key, &mut lru);
+        assert!(r3.contains("C-OK") && !r3.contains("C-ERR"),
+            "status 1->0 must re-trigger a status-aware render (gate's status check must fail), got: {r3}");
+        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
+            "1->0 transition must also be Path 2");
+
+        let key2 = compute_cache_key(cwd.path(), "emacs", 120, 0, 0);
+        let r4 = render_cached(&ctx0, Some(gd.path()), &cfg, &key2, &mut lru);
+        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 2,
+            "positive control: a fresh key must still full-render (Path 3) and bust");
+        assert!(r4.contains("C-OK"), "fresh-key render must work, got: {r4}");
     }
 
 }

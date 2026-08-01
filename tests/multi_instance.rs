@@ -46,7 +46,7 @@ impl MultiRepoHarness {
         self.settle_and_poll();
         let gd = starship_daemon::find_git_dir(repo_path);
         let v = self.watcher.version(repo_path);
-        let key = cache::compute_cache_key(repo_path, 0, "vi", 120, 0, v);
+        let key = cache::compute_cache_key(repo_path, "vi", 120, 0, v);
         let ctx = RenderContext {
             cwd: repo_path.to_path_buf(),
             terminal_width: 120, status_code: 0,

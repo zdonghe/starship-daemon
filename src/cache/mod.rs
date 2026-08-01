@@ -18,16 +18,15 @@ pub fn get_mtime_ns(p: &Path) -> u64 {
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct CacheKey {
     pub cwd: PathBuf,
-    pub status_code: i32,
     pub keymap: String,
     pub terminal_width: usize,
     pub config_mtime: u64,
     pub watcher_version: u64,
 }
 
-pub fn compute_cache_key(cwd: &Path, status_code: i32, keymap: &str, terminal_width: usize, config_mtime: u64, watcher_version: u64) -> CacheKey {
+pub fn compute_cache_key(cwd: &Path, keymap: &str, terminal_width: usize, config_mtime: u64, watcher_version: u64) -> CacheKey {
     CacheKey {
-        cwd: cwd.to_path_buf(), status_code, keymap: keymap.to_string(), terminal_width,
+        cwd: cwd.to_path_buf(), keymap: keymap.to_string(), terminal_width,
         config_mtime, watcher_version,
     }
 }
@@ -57,9 +56,9 @@ mod tests {
 
     #[test]
     fn compute_cache_key_all_fields() {
-        let k = compute_cache_key(Path::new("/home/user"), 42, "emacs", 100, 7, 3);
+        let k = compute_cache_key(Path::new("/home/user"), "emacs", 100, 7, 3);
         let expected = CacheKey {
-            cwd: PathBuf::from("/home/user"), status_code: 42, keymap: "emacs".into(),
+            cwd: PathBuf::from("/home/user"), keymap: "emacs".into(),
             terminal_width: 100, config_mtime: 7, watcher_version: 3,
         };
         assert_eq!(k, expected, "struct comparison catches swapped-field bugs");
@@ -67,8 +66,8 @@ mod tests {
 
     #[test]
     fn compute_cache_key_different_watcher_version_differentiates() {
-        let k1 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 0);
-        let k2 = compute_cache_key(Path::new("/a"), 0, "vi", 120, 0, 5);
+        let k1 = compute_cache_key(Path::new("/a"), "vi", 120, 0, 0);
+        let k2 = compute_cache_key(Path::new("/a"), "vi", 120, 0, 5);
         assert_ne!(k1, k2);
     }
 }

@@ -23,7 +23,7 @@ function prompt {
 }
 ```
 
-The module auto-starts the daemon and replaces `prompt`.
+The module auto-starts the daemon and replaces the `prompt` function.
 
 ## Config
 
@@ -37,9 +37,9 @@ Hot reloading is supported.
 
 ## Caching
 
-The daemon caches prompts by (cwd, exit code, keymap, terminal width, config mtime, watcher generation). 
+The daemon caches prompts by (cwd, keymap, terminal width, config mtime, watcher generation). The exit code is decoupled from the cache: only the `status` and `character` modules read it, so they are re-rendered live on an exit-code change while the rest of the prompt reuses cached segments.
 
-The watcher tracks the entire directory, and will get updated/notified if something in .git changes. Since we don't have module specific cache, it doesn't matter if there's a file modification or a `git checkout`, either way, we need to recompute `git status`.
+The watcher tracks the entire directory for changes, which tells us when to invalidate the cache and re-render/re-compute something, such as `git status`.
 
 Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 

@@ -393,7 +393,7 @@ fn config_mtime_changes_cache_key() {
     let r = TestRepo::new();
 
     let mtime_before = cache::get_mtime_ns(&cfg_path);
-    let key_before = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_before, 0);
+    let key_before = cache::compute_cache_key(r.path(), "vi", 120, mtime_before, 0);
 
     // Retry with escalating backoff: coarse-mtime filesystems (FAT, network)
     // may not observe a rewrite within the same tick.
@@ -409,6 +409,6 @@ fn config_mtime_changes_cache_key() {
     assert_ne!(mtime_after, mtime_before,
         "config mtime did not change across backoff retries (mtime granularity too coarse for this filesystem)");
 
-    let key_after = cache::compute_cache_key(r.path(), 0, "vi", 120, mtime_after, 0);
+    let key_after = cache::compute_cache_key(r.path(), "vi", 120, mtime_after, 0);
     assert_ne!(key_before, key_after, "config change should produce different cache key (config_mtime tracked)");
 }

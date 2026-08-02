@@ -247,6 +247,7 @@ mod tests {
         assert_eq!(d.lru.len(), 0, "disable_cache must bypass the render cache");
     }
 
+    #[cfg(fork_starship)]
     fn git_cmd(repo: &std::path::Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .arg("-C").arg(repo)
@@ -259,6 +260,7 @@ mod tests {
     // A checked-out branch rewrites .git/HEAD, which the watcher does not
     // treat as internal (watch.rs is_internal test table), so it must bump
     // the repo version. Waits for the async ReadDirectoryChangesW event.
+    #[cfg(fork_starship)]
     fn wait_for_bump(w: &mut WatcherState, repo: &std::path::Path, before: u64) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -269,6 +271,7 @@ mod tests {
         }
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn watcher_through_handle_invalidates_cache() {
         let dir = tempfile::TempDir::new().unwrap();

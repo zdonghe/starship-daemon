@@ -35,11 +35,10 @@ fn main() {
 
     // ---------- cache hit: LruCache::get ----------
     let key = cache::compute_cache_key(&cwd, "viins", 120, 0, 0);
-    let rendered = "dummy".to_string();
-    let segments = starship::print::ModuleCache::new();
     let cached = CachedValue {
-        rendered,
-        segments,
+        rendered: "dummy".to_string(),
+        #[cfg(fork_starship)]
+        segments: starship::print::ModuleCache::new(),
         time_bucket: cache::current_minute(),
         status_code: 0,
     };

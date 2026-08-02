@@ -50,10 +50,10 @@ a non-git desktop folder, the [starship](https://github.com/starship/starship) r
 
 | Config | Desktop (non-git) | starship repo (git) | Linux kernel (git) |
 |--------|-------------------|---------------------|--------------------|
-| `starship prompt` subprocess | 31.25 ms | 171.23 ms | 724.85 ms |
-| IPC + stock (no cache) | 0.67 ms | 45.96 ms | 515.24 ms |
-| IPC + gix-native (no cache) | 0.79 ms | 11.71 ms | 516.16 ms |
-| IPC + gix-native + daemon cache | **0.28 ms** | **0.30 ms** | **0.45 ms** |
+| `starship prompt` subprocess | 23.01 ms | 178.51 ms | 700.04 ms |
+| IPC + stock (no cache) | 0.76 ms | 50.61 ms | 506.20 ms |
+| IPC + gix-native (no cache) | 0.70 ms | 19.73 ms | 508.38 ms |
+| IPC + gix-native + daemon cache | **0.20 ms** | **0.14 ms** | **0.21 ms** |
 
 
 ## Build

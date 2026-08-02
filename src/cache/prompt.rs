@@ -1,12 +1,17 @@
+#[cfg(fork_starship)]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
+#[cfg(fork_starship)]
 use starship::configs::PROMPT_ORDER;
+#[cfg(fork_starship)]
 use starship::formatter::StringFormatter;
+#[cfg(fork_starship)]
 use starship::formatter::VariableHolder;
+#[cfg(fork_starship)]
 use starship::print::{get_prompt_with_cache, ModuleCache};
 
 use crate::cache::{get_mtime_ns, CacheKey};
@@ -20,6 +25,7 @@ pub struct RenderContext {
 
 pub struct CachedValue {
     pub rendered: String,
+    #[cfg(fork_starship)]
     pub segments: ModuleCache,
     pub time_bucket: u64,
     pub status_code: i32,
@@ -94,6 +100,7 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
     trim_prompt(&result)
 }
 
+#[cfg(fork_starship)]
 fn expand_all(context: &starship::context::Context) -> String {
     let format_str = &context.root_config.format;
 
@@ -118,6 +125,7 @@ fn expand_all(context: &starship::context::Context) -> String {
     format_str.replace("${all}", &replacement).replace("$all", &replacement)
 }
 
+#[cfg(fork_starship)]
 fn populate_cache(
     context: &starship::context::Context,
     format_str: &str,
@@ -156,6 +164,7 @@ fn prepare_ctx(
     sctx.set_config(config.clone())
 }
 
+#[cfg(fork_starship)]
 fn resolve_format(sctx: &starship::context::Context) -> String {
     if sctx.root_config.format.contains('$') {
         expand_all(sctx)
@@ -170,6 +179,7 @@ fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
     *rc = Some(RepoCache { git_dir: gd.to_path_buf(), index_mtime, ctx: Some(sctx) });
 }
 
+#[cfg(fork_starship)]
 fn prepare_and_resolve(
     resolved_gd: Option<&Path>,
     current_dir: &Path,
@@ -185,6 +195,7 @@ fn trim_prompt(s: &str) -> String {
     s.trim_end_matches('\n').to_string()
 }
 
+#[cfg(fork_starship)]
 pub fn render_cached(
     ctx: &RenderContext,
     git_dir: Option<&Path>,
@@ -246,13 +257,40 @@ pub fn render_cached(
     rendered
 }
 
+// Stock starship exposes no segment API, so the whole rendered prompt is
+// cached instead.
+#[cfg(not(fork_starship))]
+pub fn render_cached(
+    ctx: &RenderContext,
+    git_dir: Option<&Path>,
+    config: &toml::Table,
+    full_key: &CacheKey,
+    lru: &mut LruCache<CacheKey, CachedValue>,
+) -> String {
+    let tb = crate::cache::current_minute();
+    if let Some(entry) = lru.get(full_key).filter(|e| e.time_bucket == tb && e.status_code == ctx.status_code) {
+        return entry.rendered.clone();
+    }
+    let rendered = render_prompt_with_config(ctx, git_dir, config);
+    lru.put(full_key.clone(), CachedValue {
+        rendered: rendered.clone(),
+        time_bucket: tb,
+        status_code: ctx.status_code,
+    });
+    rendered
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(fork_starship)]
     use std::num::NonZeroUsize;
 
+    #[cfg(fork_starship)]
     use super::*;
+    #[cfg(fork_starship)]
     use crate::cache::compute_cache_key;
 
+    #[cfg(fork_starship)]
     fn test_ctx(cwd: &Path) -> starship::context::Context<'static> {
         let mut p = starship::context::Properties::default();
         p.status_code = Some("0".to_string());
@@ -271,6 +309,7 @@ mod tests {
         ctx
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn expand_all_no_all_in_format() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -279,6 +318,7 @@ mod tests {
         assert_eq!(fmt, "$character");
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn expand_all_replaces_all_with_explicit() {
         let mut p = starship::context::Properties::default();
@@ -302,6 +342,7 @@ mod tests {
         assert!(!fmt.contains("$all"), "expanded format does not contain $all");
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn expand_all_skips_disabled_modules() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -317,6 +358,7 @@ mod tests {
         assert!(!fmt.contains("$character"), "disabled module excluded from expansion");
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn expand_all_with_right_format_exclusions() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -333,6 +375,7 @@ mod tests {
             "right_format modules must be excluded from $all expansion");
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn render_cached_matches_render_prompt_with_config() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -367,6 +410,7 @@ mod tests {
         assert_eq!(got3, expected, "time-only re-render should match full render");
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn time_only_re_render_refreshes_bucket() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -402,6 +446,7 @@ mod tests {
         assert_eq!(cached.time_bucket, tb, "time_bucket must be updated");
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn multiple_stale_bucket_rereads_preserve_cache() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -456,6 +501,7 @@ mod tests {
         }
     }
 
+    #[cfg(fork_starship)]
     #[test]
     fn render_cached_status_code_isolation() {
         // Clear any repo-cache entry left by a prior test (or a failed run of
@@ -548,4 +594,80 @@ mod tests {
         assert!(r4.contains("C-OK"), "fresh-key render must work, got: {r4}");
     }
 
+}
+
+#[cfg(all(test, not(fork_starship)))]
+mod stock_cache_tests {
+    use std::num::NonZeroUsize;
+
+    use lru::LruCache;
+
+    use super::*;
+    use crate::cache::compute_cache_key;
+
+    fn cfg() -> toml::Table {
+        toml::toml! {
+            format = "$character"
+            add_newline = false
+            [character]
+            success_symbol = "C-OK"
+            error_symbol = "C-ERR"
+        }
+    }
+
+    fn ctx(cwd: &Path, status: i32) -> RenderContext {
+        RenderContext {
+            cwd: cwd.to_path_buf(), terminal_width: 120, status_code: status, keymap: "".to_string(),
+        }
+    }
+
+    // keymap "" is deliberate: "vi" maps to ShellEditMode::Normal and
+    // character.rs uses vimcmd_symbol, bypassing success/error_symbol.
+
+    #[test]
+    fn hit_serves_cached_rendered_without_rerender() {
+        let cwd = tempfile::TempDir::new().unwrap();
+        let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
+        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
+        lru.put(key.clone(), CachedValue {
+            rendered: "SEEDED".to_string(),
+            time_bucket: crate::cache::current_minute(),
+            status_code: 0,
+        });
+        let r = render_cached(&ctx(cwd.path(), 0), None, &cfg(), &key, &mut lru);
+        assert_eq!(r, "SEEDED", "same minute + status must serve the cache, not re-render");
+    }
+
+    #[test]
+    fn status_change_misses_and_refreshes() {
+        let cwd = tempfile::TempDir::new().unwrap();
+        let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
+        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
+        lru.put(key.clone(), CachedValue {
+            rendered: "SEEDED".to_string(),
+            time_bucket: crate::cache::current_minute(),
+            status_code: 0,
+        });
+        let r = render_cached(&ctx(cwd.path(), 1), None, &cfg(), &key, &mut lru);
+        assert_ne!(r, "SEEDED", "status change must miss the cache");
+        assert!(r.contains("C-ERR"), "status 1 must render the error symbol, got: {r}");
+        let (_, e) = lru.pop_entry(&key).unwrap();
+        assert_eq!(e.status_code, 1, "cached status must be refreshed");
+    }
+
+    #[test]
+    fn minute_rollover_misses_and_refreshes_bucket() {
+        let cwd = tempfile::TempDir::new().unwrap();
+        let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
+        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
+        lru.put(key.clone(), CachedValue {
+            rendered: "SEEDED".to_string(),
+            time_bucket: crate::cache::current_minute() - 1,
+            status_code: 0,
+        });
+        let r = render_cached(&ctx(cwd.path(), 0), None, &cfg(), &key, &mut lru);
+        assert_ne!(r, "SEEDED", "stale time bucket must miss the cache");
+        let (_, e) = lru.pop_entry(&key).unwrap();
+        assert_eq!(e.time_bucket, crate::cache::current_minute(), "bucket must refresh");
+    }
 }

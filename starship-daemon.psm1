@@ -34,35 +34,50 @@ function Get-StarshipPrompt
         }
 
         # pwsh 7+ only: process cwd tracks Set-Location in Core; 5.1 would go stale.
-        $cwd = [System.IO.Directory]::GetCurrentDirectory()
+        $cwd = $PWD.ProviderPath
         $cwdBytes = [Text.Encoding]::UTF8.GetBytes($cwd)
 
-        $propsJson = '{"status_code":' + $ExitCode + ',"keymap":"' + $Keymap + '","terminal_width":' + $Width
-
-        $currentCfg = $env:STARSHIP_CONFIG
-        $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
-        if ($cfgChanged)
+        if ($cwdBytes.Length -gt 32768)
         {
-            $propsJson += ',"starship_config":"' + $currentCfg + '"'
+            # The daemon caps cwd at 32768 bytes (MAX_CWD_LEN). A longer cwd
+            # would be rejected and could wedge a frame over the 64 KiB pipe
+            # buffer; fall back to the plain prompt instead.
+            return $null
         }
-
-        if ($env:STARSHIP_DAEMON_CACHE -eq "0")
-        {
-            $propsJson += ',"disable_cache":true'
-        }
-
-        $propsJson += '}'
-        $propsBytes = [Text.Encoding]::UTF8.GetBytes($propsJson)
 
         $failed = $false
         $result = $null
         try
         {
-            $buf = [byte[]]::new(4 + $cwdBytes.Length + 4 + $propsBytes.Length)
-            [BitConverter]::GetBytes([uint32]$cwdBytes.Length).CopyTo($buf, 0)
-            $cwdBytes.CopyTo($buf, 4)
-            [BitConverter]::GetBytes([uint32]$propsBytes.Length).CopyTo($buf, 4 + $cwdBytes.Length)
-            $propsBytes.CopyTo($buf, 4 + $cwdBytes.Length + 4)
+            $keymapBytes = [Text.Encoding]::UTF8.GetBytes($Keymap)
+            $currentCfg = $env:STARSHIP_CONFIG
+            $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
+            if ($cfgChanged)
+            {
+                $configBytes = [Text.Encoding]::UTF8.GetBytes($currentCfg)
+            } else
+            {
+                $configBytes = [byte[]]::new(0)
+            }
+            $disableCache = 0
+            if ($env:STARSHIP_DAEMON_CACHE -eq "0")
+            { $disableCache = 1 }
+
+            # Single little-endian frame, matching the daemon's LE wire layout.
+            $bodyLen = 4 + $cwdBytes.Length + 4 + 2 + $keymapBytes.Length + 4 + 2 + $configBytes.Length + 1
+            $buf = [byte[]]::new(5 + $bodyLen)
+            $buf[0] = 1
+            [BitConverter]::GetBytes([uint32]$bodyLen).CopyTo($buf, 1)
+            $o = 5
+            [BitConverter]::GetBytes([uint32]$cwdBytes.Length).CopyTo($buf, $o); $o += 4
+            $cwdBytes.CopyTo($buf, $o); $o += $cwdBytes.Length
+            [BitConverter]::GetBytes([int32]$ExitCode).CopyTo($buf, $o); $o += 4
+            [BitConverter]::GetBytes([uint16]$keymapBytes.Length).CopyTo($buf, $o); $o += 2
+            $keymapBytes.CopyTo($buf, $o); $o += $keymapBytes.Length
+            [BitConverter]::GetBytes([uint32]$Width).CopyTo($buf, $o); $o += 4
+            [BitConverter]::GetBytes([uint16]$configBytes.Length).CopyTo($buf, $o); $o += 2
+            $configBytes.CopyTo($buf, $o); $o += $configBytes.Length
+            $buf[$o] = [byte]$disableCache
             $pipe.Write($buf, 0, $buf.Length)
             $pipe.Flush()
 
@@ -70,15 +85,13 @@ function Get-StarshipPrompt
             if ($pipe.Read($lenBuf, 0, 4) -ne 4)
             {
                 $failed = $true
-            }
-            else
+            } else
             {
                 $respLen = [BitConverter]::ToUInt32($lenBuf, 0)
                 if ($respLen -le 0 -or $respLen -gt 65536)
                 {
                     $failed = $true
-                }
-                else
+                } else
                 {
                     $respBuf = [byte[]]::new($respLen)
                     $read = 0

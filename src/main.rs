@@ -9,7 +9,7 @@ use lru::LruCache;
 use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::ffi::{self, HANDLE, DWORD, LPVOID, LPCVOID};
 use starship_daemon::watch::{WatcherState, MAX_WATCHED_REPOS, STATS_ENABLED, drain_stats};
-use starship_daemon::{ParsedRequest, parse_request};
+use starship_daemon::{ParsedRequest, parse_request, PROTO_VERSION, HEADER_LEN, MAX_TOTAL_LEN};
 
 const PIPE_ACCESS_DUPLEX: DWORD = 3;
 const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
@@ -28,7 +28,10 @@ const PIPE_READMODE_BYTE: DWORD = 0;
 // Both are bounded by the 9-instance cap and self-heal under pressure.
 const MAX_SESSIONS: usize = 9;
 const MAX_REQS_PER_WAKE: u32 = 8;
-const BUF_SIZE: usize = 4 + 32768 + 4 + 4096;
+// Max frame: [u8 version][u32 LE total_len][body] = 5 + 65531 = 65536. The body
+// caps (cwd 32768, keymap 256, config 4096) plus fixed fields total ~37 KiB; the
+// headroom is forward-compat slack. Must equal MAX_FRAME_LEN in lib.rs.
+const BUF_SIZE: usize = 65536;
 
 // The wait set shares MAXIMUM_WAIT_OBJECTS (64); the session events and watcher
 // change events are the only handles in it. Compile-time guard against silent
@@ -37,9 +40,8 @@ const _: () = assert!(MAX_SESSIONS + MAX_WATCHED_REPOS <= 64);
 
 #[derive(Clone, Copy)]
 enum ReadStage {
-    Header,
-    Mid { cwd_len: usize },
-    Body,
+    Header, // 5 bytes: [u8 version][u32 LE total_len]
+    Body,   // total_len bytes of body
 }
 
 struct Session {
@@ -71,7 +73,7 @@ impl Session {
             write_in_flight: false,
             write_buf: Vec::new(),
             stage: ReadStage::Header,
-            want: 4,
+            want: HEADER_LEN,
             got: 0,
             last_activity: Instant::now(),
         }
@@ -172,7 +174,7 @@ fn disconnect_session(s: &mut Session) {
     s.write_buf.clear();
     s.sync_bytes = 0;
     s.stage = ReadStage::Header;
-    s.want = 4;
+    s.want = HEADER_LEN;
     s.got = 0;
     rearm_connect(s);
 }
@@ -225,17 +227,19 @@ fn service_session(
             // got >= want: current stage complete.
             match s.stage {
                 ReadStage::Header => {
-                    let cwd_len = u32::from_le_bytes(s.buf[..4].try_into().unwrap()) as usize;
-                    if cwd_len > 32768 { disconnect_session(s); return; }
-                    s.stage = ReadStage::Mid { cwd_len };
-                    s.want = 4 + cwd_len + 4;
-                }
-                ReadStage::Mid { cwd_len } => {
-                    let props_start = 4 + cwd_len;
-                    let props_len = u32::from_le_bytes(s.buf[props_start..props_start + 4].try_into().unwrap()) as usize;
-                    if props_len > 4096 || props_len == 0 { disconnect_session(s); return; }
+                    // Version or length violations are deterministic: drop the
+                    // connection. The client falls back to its plain prompt.
+                    if s.buf[0] != PROTO_VERSION {
+                        disconnect_session(s);
+                        return;
+                    }
+                    let total_len = u32::from_le_bytes(s.buf[1..HEADER_LEN].try_into().unwrap()) as usize;
+                    if total_len > MAX_TOTAL_LEN {
+                        disconnect_session(s);
+                        return;
+                    }
                     s.stage = ReadStage::Body;
-                    s.want = props_start + 4 + props_len;
+                    s.want = HEADER_LEN + total_len;
                 }
                 ReadStage::Body => {
                     if !process_request(s, s.want, config_path, cached_config, last_cfg_mtime, lru, watcher) {
@@ -244,7 +248,7 @@ fn service_session(
                     }
                     served += 1;
                     s.stage = ReadStage::Header;
-                    s.want = 4;
+                    s.want = HEADER_LEN;
                     s.got = 0;
                     // Issue the staged response asynchronously; never block the
                     // daemon on a full out-buffer. A Pending write returns to
@@ -257,13 +261,13 @@ fn service_session(
                     if served >= MAX_REQS_PER_WAKE {
                         // Firehose cap: self-wake so other sessions and the
                         // watcher get serviced this loop iteration.
-                        match issue_read_at(s, 0, 4) {
+                        match issue_read_at(s, 0, HEADER_LEN) {
                             IssueOutcome::Sync => { unsafe { ffi::SetEvent(s.event); } return; }
                             IssueOutcome::Pending => return,
                             IssueOutcome::Error => { disconnect_session(s); return; }
                         }
                     }
-                    match issue_read_at(s, 0, 4) {
+                    match issue_read_at(s, 0, HEADER_LEN) {
                         IssueOutcome::Sync => break, // next request already buffered
                         IssueOutcome::Pending => return,
                         IssueOutcome::Error => { disconnect_session(s); return; }
@@ -279,7 +283,7 @@ fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cac
     // Lenient empty cwd: feed "." so rendering never sees a zero-length path.
     let cwd = if cwd.as_os_str().is_empty() { PathBuf::from(".") } else { cwd };
     let git_dir = starship_daemon::find_git_dir(&cwd);
-    let status_code = props.status_code.unwrap_or(0);
+    let status_code = props.status_code;
     let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
 
     let mut cfg_changed = false;
@@ -311,9 +315,9 @@ fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cac
         *last_cfg_mtime
     };
 
-    let tw = props.terminal_width.unwrap_or(120);
+    let tw = props.terminal_width;
 
-    if props.disable_cache.unwrap_or(false) {
+    if props.disable_cache {
         let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
         let output = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
         stage_response(s, &output);
@@ -337,6 +341,7 @@ fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cac
 }
 
 fn stage_response(s: &mut Session, output: &str) {
+    // [u32 LE len][prompt utf8]; len = prompt.len().
     let mut wb = Vec::with_capacity(4 + output.len());
     wb.extend_from_slice(&(output.len() as u32).to_le_bytes());
     wb.extend_from_slice(output.as_bytes());
@@ -423,7 +428,7 @@ fn main() {
                     service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
                 } else {
                     s.active = true;
-                    match issue_read_at(s, 0, 4) {
+                    match issue_read_at(s, 0, HEADER_LEN) {
                         IssueOutcome::Sync => service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher),
                         IssueOutcome::Pending => {}
                         IssueOutcome::Error => disconnect_session(s),

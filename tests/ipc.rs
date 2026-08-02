@@ -3,7 +3,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use starship_daemon::ffi;
+use starship_daemon::{ffi, PROTO_VERSION, HEADER_LEN, MAX_TOTAL_LEN, MAX_KEYMAP_LEN, MAX_CONFIG_LEN};
 
 const PIPE_PATH: &str = r"\\.\pipe\starship-daemon";
 
@@ -23,6 +23,52 @@ fn unique_pipe_name() -> &'static str {
 }
 
 static DAEMON_LOCK: Mutex<()> = Mutex::new(());
+
+// Binary request builders matching the v1 wire protocol in lib.rs. The body
+// after cwd is [i32 status][u16 keymap_len][keymap][u32 width][u16 config_len]
+// [config][u8 disable]; keymap/config_len == 0 decodes to None.
+fn encode_props(status: i32, keymap: Option<&str>, width: u32, config: Option<&str>, disable: bool) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&status.to_le_bytes());
+    match keymap {
+        Some(k) => {
+            body.extend_from_slice(&(k.len() as u16).to_le_bytes());
+            body.extend_from_slice(k.as_bytes());
+        }
+        None => body.extend_from_slice(&0u16.to_le_bytes()),
+    }
+    body.extend_from_slice(&width.to_le_bytes());
+    match config {
+        Some(c) => {
+            body.extend_from_slice(&(c.len() as u16).to_le_bytes());
+            body.extend_from_slice(c.as_bytes());
+        }
+        None => body.extend_from_slice(&0u16.to_le_bytes()),
+    }
+    body.push(disable as u8);
+    body
+}
+
+fn props_empty() -> Vec<u8> {
+    encode_props(0, None, 0, None, false)
+}
+
+fn encode_body(cwd: &str, status: i32, keymap: Option<&str>, width: u32, config: Option<&str>, disable: bool) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&(cwd.len() as u32).to_le_bytes());
+    body.extend_from_slice(cwd.as_bytes());
+    body.extend_from_slice(&encode_props(status, keymap, width, config, disable));
+    body
+}
+
+fn encode_request(cwd: &str, status: i32, keymap: Option<&str>, width: u32, config: Option<&str>, disable: bool) -> Vec<u8> {
+    let body = encode_body(cwd, status, keymap, width, config, disable);
+    let mut frame = Vec::with_capacity(HEADER_LEN + body.len());
+    frame.push(PROTO_VERSION);
+    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&body);
+    frame
+}
 
 struct PipeClient {
     handle: ffi::HANDLE,
@@ -55,17 +101,19 @@ impl PipeClient {
         }
     }
 
-    fn send_request(&self, cwd: &str, props: &str) -> bool {
+    fn send_request(&self, cwd: &str, props: &[u8]) -> bool {
+        let cwd_bytes = cwd.as_bytes();
+        let mut body = Vec::with_capacity(4 + cwd_bytes.len() + props.len());
+        body.extend_from_slice(&(cwd_bytes.len() as u32).to_le_bytes());
+        body.extend_from_slice(cwd_bytes);
+        body.extend_from_slice(props);
+        let mut frame = Vec::with_capacity(HEADER_LEN + body.len());
+        frame.push(PROTO_VERSION);
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&body);
         unsafe {
-            let cwd_bytes = cwd.as_bytes();
-            let props_bytes = props.as_bytes();
             let mut written: ffi::DWORD = 0;
-            let cwd_len = (cwd_bytes.len() as u32).to_le_bytes();
-            if ffi::WriteFile(self.handle, cwd_len.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut()) == 0 { return false; }
-            if ffi::WriteFile(self.handle, cwd_bytes.as_ptr() as *const c_void, cwd_bytes.len() as u32, &mut written, std::ptr::null_mut()) == 0 { return false; }
-            let props_len = (props_bytes.len() as u32).to_le_bytes();
-            if ffi::WriteFile(self.handle, props_len.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut()) == 0 { return false; }
-            if ffi::WriteFile(self.handle, props_bytes.as_ptr() as *const c_void, props_bytes.len() as u32, &mut written, std::ptr::null_mut()) == 0 { return false; }
+            if ffi::WriteFile(self.handle, frame.as_ptr() as *const c_void, frame.len() as u32, &mut written, std::ptr::null_mut()) == 0 { return false; }
             ffi::FlushFileBuffers(self.handle) != 0
         }
     }
@@ -103,6 +151,7 @@ impl PipeClient {
                 }
                 total_read += read as usize;
             }
+            // [u32 len][prompt]: read the whole payload and decode.
             String::from_utf8(resp_buf).ok()
         }
     }
@@ -207,7 +256,7 @@ fn check_response(resp: &str) {
 fn ipc_content_served() {
     with_daemon(|| {
         let c = PipeClient::connect(1000).expect("connect");
-        assert!(c.send_request(".", "{}"));
+        assert!(c.send_request(".", &props_empty()));
         let resp = c.read_response().expect("read response");
         check_response(&resp);
     });
@@ -219,14 +268,14 @@ fn ipc_reconnect() {
         let resp1;
         {
             let c = PipeClient::connect(1000).expect("first connect");
-            assert!(c.send_request(".", "{}"));
+            assert!(c.send_request(".", &props_empty()));
             resp1 = c.read_response().expect("first response");
             check_response(&resp1);
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
         {
             let c = PipeClient::connect(1000).expect("reconnect");
-            assert!(c.send_request(".", "{}"));
+            assert!(c.send_request(".", &props_empty()));
             let resp2 = c.read_response().expect("second response");
             check_response(&resp2);
             assert_eq!(resp1, resp2, "same cwd and props should give same prompt");
@@ -240,7 +289,7 @@ fn ipc_multiple_connections() {
         for i in 0..5 {
             let c = PipeClient::connect(1000)
                 .unwrap_or_else(|| panic!("connect attempt {i}"));
-            assert!(c.send_request(".", r#"{"status_code":0}"#));
+            assert!(c.send_request(".", &encode_props(0, None, 0, None, false)));
             let resp = c.read_response()
                 .unwrap_or_else(|| panic!("response {i}"));
             check_response(&resp);
@@ -254,6 +303,7 @@ fn ipc_mid_request_disconnect() {
     with_daemon(|| {
         let raw = ManuallyDrop::new(PipeClient::connect(1000).expect("connect with retry"));
         unsafe {
+            // 4 of the 5 header bytes, then close mid-header.
             let partial = b"AAAA";
             let mut written: ffi::DWORD = 0;
             ffi::WriteFile(raw.handle, partial.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut());
@@ -262,7 +312,7 @@ fn ipc_mid_request_disconnect() {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let c = PipeClient::connect(1000).expect("reconnect after partial write");
-        assert!(c.send_request(".", "{}"));
+        assert!(c.send_request(".", &props_empty()));
         let resp = c.read_response().expect("response after partial write");
         check_response(&resp);
     });
@@ -275,13 +325,13 @@ fn ipc_custom_status_code() {
          [status]\ndisabled = false\nsuccess_symbol = \"OK\"\nsymbol = \"FAIL\"\n",
         || {
             let c = PipeClient::connect(1000).expect("connect");
-            assert!(c.send_request(".", r#"{"status_code":0}"#));
+            assert!(c.send_request(".", &encode_props(0, None, 0, None, false)));
             let resp0 = c.read_response().expect("status 0 response");
             assert!(resp0.contains("OK"),
                 "status 0 prompt should contain OK symbol, got: {resp0:?}");
 
             let c = PipeClient::connect(1000).expect("reconnect");
-            assert!(c.send_request(".", r#"{"status_code":1}"#));
+            assert!(c.send_request(".", &encode_props(1, None, 0, None, false)));
             let resp1 = c.read_response().expect("status 1 response");
             assert_ne!(resp0, resp1, "different status codes must give different prompts");
             assert!(resp1.contains("FAIL"),
@@ -294,7 +344,7 @@ fn ipc_custom_status_code() {
 fn ipc_disable_cache() {
     with_daemon(|| {
         let c = PipeClient::connect(1000).expect("connect");
-        assert!(c.send_request(".", r#"{"disable_cache":true}"#));
+        assert!(c.send_request(".", &encode_props(0, None, 0, None, true)));
         let resp = c.read_response().expect("response");
         check_response(&resp);
     });
@@ -306,34 +356,19 @@ fn ipc_sync_drop_race() {
         let a = PipeClient::connect(1000).expect("A connect");
         std::thread::sleep(Duration::from_millis(300));
 
-        unsafe {
-            let mut written: ffi::DWORD = 0;
-            let cwd_len = 1u32.to_le_bytes();
-            ffi::WriteFile(a.handle, cwd_len.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut());
-            ffi::FlushFileBuffers(a.handle);
-        }
+        // A writes 4 of the 5 header bytes and stalls. cwd="." has an 18-byte
+        // body, so total_len = 18.
+        assert!(a.write_raw(&[PROTO_VERSION, 18, 0, 0]));
         std::thread::sleep(Duration::from_millis(200));
 
         let b = PipeClient::connect(1000).expect("B connect");
-        unsafe {
-            let mut written: ffi::DWORD = 0;
-            let cwd_bytes: &[u8] = b".";
-            let props_bytes = b"{}";
-            let buf = [1u8, 0u8, 0u8, 0u8];
-            let props_len = (props_bytes.len() as u32).to_le_bytes();
-            ffi::WriteFile(b.handle, buf.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut());
-            ffi::WriteFile(b.handle, cwd_bytes.as_ptr() as *const c_void, cwd_bytes.len() as u32, &mut written, std::ptr::null_mut());
-            ffi::WriteFile(b.handle, props_len.as_ptr() as *const c_void, 4, &mut written, std::ptr::null_mut());
-            ffi::WriteFile(b.handle, props_bytes.as_ptr() as *const c_void, props_bytes.len() as u32, &mut written, std::ptr::null_mut());
-        }
+        assert!(b.write_raw(&encode_request(".", 0, None, 0, None, false)));
         std::thread::sleep(Duration::from_millis(200));
 
-        unsafe {
-            let mut written: ffi::DWORD = 0;
-            let rest = [b'.', 2u8, 0u8, 0u8, 0u8, b'{', b'}'];
-            ffi::WriteFile(a.handle, rest.as_ptr() as *const c_void, rest.len() as u32, &mut written, std::ptr::null_mut());
-            ffi::FlushFileBuffers(a.handle);
-        }
+        // A completes the header and its full body.
+        let mut rest = vec![0u8];
+        rest.extend_from_slice(&encode_body(".", 0, None, 0, None, false));
+        assert!(a.write_raw(&rest));
 
         let start = Instant::now();
         let resp = b.read_response();
@@ -378,7 +413,7 @@ fn ipc_git_push_stale_ahead() {
         "format = \"$git_status\"\nadd_newline = false\n[git_status]\nformat = \"$ahead_behind\"\n",
         || {
             let c = PipeClient::connect(1000).expect("connect");
-            assert!(c.send_request(&repo_str, "{}"));
+            assert!(c.send_request(&repo_str, &props_empty()));
             let before_push = c.read_response().expect("before push");
             assert!(before_push.contains('⇡'),
                 "prompt should show ahead indicator before push, got: {before_push:?}");
@@ -390,7 +425,7 @@ fn ipc_git_push_stale_ahead() {
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));
                 if let Some(c2) = PipeClient::connect(500) {
-                    if c2.send_request(&repo_str, "{}") {
+                    if c2.send_request(&repo_str, &props_empty()) {
                         if let Some(resp) = c2.read_response() {
                             if !resp.contains('⇡') {
                                 after_push = Some(resp);
@@ -441,19 +476,14 @@ fn setup_ahead_repo() -> (tempfile::TempDir, tempfile::TempDir, String) {
 fn ipc_stalled_client_does_not_freeze_daemon() {
     with_daemon(|| {
         let a = PipeClient::connect(1000).expect("A connect");
-        // Send only the 4-byte cwd_len header, then stall. The async read
-        // state machine must not block other sessions while A's body is
-        // incomplete (main.rs:183).
-        assert!(a.write_raw(&1u32.to_le_bytes()));
+        // Send 4 of the 5 header bytes, then stall. The async read state
+        // machine must not block other sessions while A's header is incomplete
+        // (main.rs:183). cwd="." -> body is 18 bytes.
+        assert!(a.write_raw(&[PROTO_VERSION, 18, 0, 0]));
         std::thread::sleep(Duration::from_millis(300));
 
         let b = PipeClient::connect(1000).expect("B connect");
-        let cwd_len = 1u32.to_le_bytes();
-        let props_len = 2u32.to_le_bytes();
-        assert!(b.write_raw(&cwd_len));
-        assert!(b.write_raw(b"."));
-        assert!(b.write_raw(&props_len));
-        assert!(b.write_raw(b"{}"));
+        assert!(b.write_raw(&encode_request(".", 0, None, 0, None, false)));
         // While A is stalled mid-request, B must still be served promptly.
         let r = b.read_response_timeout(500);
         assert!(r.is_some(),
@@ -461,7 +491,8 @@ fn ipc_stalled_client_does_not_freeze_daemon() {
         check_response(&r.unwrap());
 
         // A completes its request -> daemon serves A.
-        let rest = [b'.', 2, 0, 0, 0, b'{', b'}'];
+        let mut rest = vec![0u8];
+        rest.extend_from_slice(&encode_body(".", 0, None, 0, None, false));
         assert!(a.write_raw(&rest));
         let resp_a = a.read_response_timeout(2000).expect("A served after completing");
         check_response(&resp_a);
@@ -472,11 +503,8 @@ fn ipc_stalled_client_does_not_freeze_daemon() {
 fn ipc_zero_cwd_len_served() {
     with_daemon(|| {
         let c = PipeClient::connect(1000).expect("connect");
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes()); // cwd_len = 0 is valid
-        buf.extend_from_slice(&2u32.to_le_bytes());
-        buf.extend_from_slice(b"{}");
-        assert!(c.write_raw(&buf));
+        // Minimal 22-byte frame: empty cwd is valid (decodes to "." daemon-side).
+        assert!(c.write_raw(&encode_request("", 0, None, 0, None, false)));
         let r = c.read_response_timeout(1000);
         assert!(r.is_some(), "daemon disconnected a cwd_len=0 request - C2 refuted, got {r:?}");
         check_response(&r.unwrap());
@@ -487,14 +515,14 @@ fn ipc_zero_cwd_len_served() {
 fn ipc_fragmented_header_accumulates() {
     with_daemon(|| {
         let c = PipeClient::connect(1000).expect("connect");
-        // Split the 4-byte cwd_len header across two writes. The state
-        // machine must accumulate partial reads, not disconnect (main.rs:183).
-        assert!(c.write_raw(&[1, 0]));
+        // Split the 5-byte header across two writes, then the 5th byte and the
+        // full body. The state machine must accumulate partial reads, not
+        // disconnect (main.rs:183). cwd="." -> body is 18 bytes.
+        assert!(c.write_raw(&[PROTO_VERSION, 18]));
         std::thread::sleep(Duration::from_millis(100));
         assert!(c.write_raw(&[0, 0]));
-        assert!(c.write_raw(b"."));
-        assert!(c.write_raw(&2u32.to_le_bytes()));
-        assert!(c.write_raw(b"{}"));
+        assert!(c.write_raw(&[0]));
+        assert!(c.write_raw(&encode_body(".", 0, None, 0, None, false)));
         let r = c.read_response_timeout(2000);
         assert!(r.is_some(), "fragmented header disconnected the client - C6 refuted, got {r:?}");
         check_response(&r.unwrap());
@@ -505,14 +533,15 @@ fn ipc_fragmented_header_accumulates() {
 fn ipc_fragmented_cwd_accumulates() {
     with_daemon(|| {
         let c = PipeClient::connect(1000).expect("connect");
-        assert!(c.write_raw(&5u32.to_le_bytes())); // cwd_len = 5
+        // Full 5-byte header, then only 2 of the 22 body bytes; the rest
+        // arrive later. cwd="abcde" -> body is 22 bytes.
+        assert!(c.write_raw(&[PROTO_VERSION, 22, 0, 0, 0]));
         std::thread::sleep(Duration::from_millis(100));
-        // Only 2 of the 5 cwd bytes; the rest arrive later.
-        assert!(c.write_raw(b"ab"));
+        let body = encode_body("abcde", 0, None, 0, None, false);
+        assert_eq!(body.len(), 22);
+        assert!(c.write_raw(&body[..6]));
         std::thread::sleep(Duration::from_millis(200));
-        assert!(c.write_raw(b"cde"));
-        assert!(c.write_raw(&2u32.to_le_bytes()));
-        assert!(c.write_raw(b"{}"));
+        assert!(c.write_raw(&body[6..]));
         let r = c.read_response_timeout(2000);
         assert!(r.is_some(), "fragmented cwd body disconnected the client - C6 refuted, got {r:?}");
         check_response(&r.unwrap());
@@ -526,7 +555,7 @@ fn ipc_git_change_fresh_at_serve() {
         "format = \"$git_status\"\nadd_newline = false\n[git_status]\nformat = \"$ahead_behind\"\n",
         || {
             let c = PipeClient::connect(1000).expect("connect");
-            assert!(c.send_request(&repo_str, "{}"));
+            assert!(c.send_request(&repo_str, &props_empty()));
             let before = c.read_response().expect("before push");
             assert!(before.contains('⇡'),
                 "prompt should show ahead indicator before push, got: {before:?}");
@@ -542,7 +571,7 @@ fn ipc_git_change_fresh_at_serve() {
             let mut cleared_at = None;
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
-                assert!(c.send_request(&repo_str, "{}"));
+                assert!(c.send_request(&repo_str, &props_empty()));
                 let resp = c.read_response().expect("response while polling");
                 if resp.contains('⇡') {
                     stale_polls += 1;
@@ -569,21 +598,13 @@ fn ipc_firehose_measurement() {
         let mut burst = Vec::new();
         for i in 0..30 {
             let cwd = format!("cwd{i}");
-            burst.extend_from_slice(&(cwd.len() as u32).to_le_bytes());
-            burst.extend_from_slice(cwd.as_bytes());
-            burst.extend_from_slice(&2u32.to_le_bytes());
-            burst.extend_from_slice(b"{}");
+            burst.extend_from_slice(&encode_request(&cwd, 0, None, 0, None, false));
         }
         assert!(a.write_raw(&burst));
         std::thread::sleep(Duration::from_millis(20));
 
         let t0 = Instant::now();
-        let cwd_len = 1u32.to_le_bytes();
-        let props_len = 2u32.to_le_bytes();
-        assert!(b.write_raw(&cwd_len));
-        assert!(b.write_raw(b"."));
-        assert!(b.write_raw(&props_len));
-        assert!(b.write_raw(b"{}"));
+        assert!(b.write_raw(&encode_request(".", 0, None, 0, None, false)));
         let resp_b = b.read_response_timeout(5000);
         let elapsed = t0.elapsed();
         println!("firehose: B's request latency while A drains 30 uncached renders: {elapsed:?}");
@@ -628,15 +649,12 @@ fn ipc_unread_responses_do_not_freeze_daemon() {
     );
     with_daemon_config(&config, || {
         let a = PipeClient::connect(1000).expect("A connect");
-        // ~200 requests (11 bytes each) = ~2.2KB, fits in A's in-buffer. Each
-        // response is ~2004 bytes, so ~32 responses fill the 64KB out-buffer.
+        // ~200 requests (23 bytes each) = ~4.6KB, fits in A's in-buffer. Each
+        // response is ~2005 bytes, so ~32 responses fill the 64KB out-buffer.
         // A never drains, so the daemon's writes to A go pending forever.
         let mut burst = Vec::new();
         for _ in 0..200 {
-            burst.extend_from_slice(&1u32.to_le_bytes());
-            burst.extend_from_slice(b".");
-            burst.extend_from_slice(&2u32.to_le_bytes());
-            burst.extend_from_slice(b"{}");
+            burst.extend_from_slice(&encode_request(".", 0, None, 0, None, false));
         }
         assert!(a.write_raw(&burst), "A should buffer its burst");
         // Give the daemon time to wedge in write_all.
@@ -644,7 +662,7 @@ fn ipc_unread_responses_do_not_freeze_daemon() {
 
         let served = with_hard_timeout(7000, || {
             let Some(b) = PipeClient::connect(1000) else { return false; };
-            if !b.send_request(".", "{}") { return false; }
+            if !b.send_request(".", &props_empty()) { return false; }
             b.read_response_timeout(5000).is_some()
         });
         assert_eq!(served, Some(true),
@@ -672,14 +690,7 @@ fn ipc_firehose_client_does_not_starve_others() {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop2 = stop.clone();
         let stop3 = stop.clone();
-        let req = {
-            let mut r = Vec::new();
-            r.extend_from_slice(&1u32.to_le_bytes());
-            r.extend_from_slice(b".");
-            r.extend_from_slice(&2u32.to_le_bytes());
-            r.extend_from_slice(b"{}");
-            r
-        };
+        let req = encode_request(".", 0, None, 0, None, false);
         // Writer floods requests in a tight loop (A's in-buffer stays full).
         // Reader drains responses so the write side never wedges - this
         // isolates the read-side starvation (finding 2).
@@ -724,7 +735,7 @@ fn ipc_firehose_client_does_not_starve_others() {
 
         let served = with_hard_timeout(4000, || {
             let Some(b) = PipeClient::connect(1000) else { return false; };
-            if !b.send_request(".", "{}") { return false; }
+            if !b.send_request(".", &props_empty()) { return false; }
             b.read_response_timeout(1500).is_some()
         });
         // Stop the flood and let the writer/reader threads exit on their own.
@@ -754,7 +765,7 @@ fn lru_eviction_rotates_slot_at_capacity() {
             // last_activity stamps are strictly ordered (each completes before the
             // next): clients[0] is the oldest and is the deterministic LRU victim.
             for i in 0..8 {
-                if !clients[i].send_request(r"C:\", "{}") || clients[i].read_response_timeout(5000).is_none() {
+                if !clients[i].send_request(r"C:\", &props_empty()) || clients[i].read_response_timeout(5000).is_none() {
                     eprintln!("round-trip client {i} failed");
                     return None;
                 }
@@ -764,16 +775,16 @@ fn lru_eviction_rotates_slot_at_capacity() {
             let start = Instant::now();
             let Some(ninth) = PipeClient::connect(3000) else { eprintln!("connect 9th failed"); return None; };
             let elapsed = start.elapsed();
-            let serviced = ninth.send_request(r"C:\", "{}")
+            let serviced = ninth.send_request(r"C:\", &props_empty())
                 && ninth.read_response_timeout(5000).is_some();
-            let lru_evicted = !clients[0].send_request(r"C:\", "{}");
-            let others_alive = (1..8).all(|i| clients[i].send_request(r"C:\", "{}")
+            let lru_evicted = !clients[0].send_request(r"C:\", &props_empty());
+            let others_alive = (1..8).all(|i| clients[i].send_request(r"C:\", &props_empty())
                 && clients[i].read_response_timeout(5000).is_some());
 
             // A fresh instance must be listening after the eviction: a 10th
             // client connects immediately and is served.
             let tenth_served = PipeClient::connect(3000)
-                .map(|c| c.send_request(r"C:\", "{}") && c.read_response_timeout(5000).is_some())
+                .map(|c| c.send_request(r"C:\", &props_empty()) && c.read_response_timeout(5000).is_some())
                 .unwrap_or(false);
             Some((elapsed, serviced, lru_evicted, others_alive, tenth_served))
         }).flatten();
@@ -789,5 +800,138 @@ fn lru_eviction_rotates_slot_at_capacity() {
             }
             None => panic!("connect or service path failed within 8s"),
         }
+    });
+}
+
+#[test]
+fn ipc_bad_version_disconnects_then_serves() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        let mut frame = encode_request(".", 0, None, 0, None, false);
+        frame[0] = 2;
+        assert!(c.write_raw(&frame));
+        // The daemon drops the connection on a bad version: no response.
+        let err = c.read_response_timeout(2000);
+        assert!(err.is_none(), "bad version must disconnect, never serve a prompt, got {err:?}");
+
+        std::thread::sleep(Duration::from_millis(100));
+        let c2 = PipeClient::connect(1000).expect("reconnect after bad version");
+        assert!(c2.send_request(".", &props_empty()));
+        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
+        check_response(&resp);
+    });
+}
+
+#[test]
+fn ipc_tail_eating_cwd_disconnects_then_serves() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        // total_len = 17, cwd_len = 13: the cwd consumes the body exactly and
+        // the fixed tail (status/keymap_len/width/config_len/disable) has no
+        // room left. The daemon must disconnect (not panic) and survive.
+        let mut body = Vec::new();
+        body.extend_from_slice(&13u32.to_le_bytes());
+        body.resize(17, 0);
+        let mut frame = Vec::new();
+        frame.push(PROTO_VERSION);
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&body);
+        assert!(c.write_raw(&frame));
+        let err = c.read_response_timeout(2000);
+        assert!(err.is_none(), "malformed frame must disconnect, never serve a prompt, got {err:?}");
+
+        std::thread::sleep(Duration::from_millis(100));
+        let c2 = PipeClient::connect(1000).expect("reconnect after malformed frame");
+        assert!(c2.send_request(".", &props_empty()));
+        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
+        check_response(&resp);
+    });
+}
+
+#[test]
+fn ipc_total_len_over_cap_disconnects_then_serves() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        // Declared total_len = MAX_TOTAL_LEN + 1 pushes the frame over the
+        // 65536 cap. The header stage (main.rs) must disconnect without
+        // reading a body.
+        let mut frame = vec![PROTO_VERSION];
+        frame.extend_from_slice(&(MAX_TOTAL_LEN as u32 + 1).to_le_bytes());
+        assert!(c.write_raw(&frame));
+        let err = c.read_response_timeout(2000);
+        assert!(err.is_none(), "over-cap total_len must disconnect, got {err:?}");
+
+        std::thread::sleep(Duration::from_millis(100));
+        let c2 = PipeClient::connect(1000).expect("reconnect after over-cap total_len");
+        assert!(c2.send_request(".", &props_empty()));
+        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
+        check_response(&resp);
+    });
+}
+
+#[test]
+fn ipc_trailing_body_bytes_tolerated() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        // Forward-compat: extra fields appended to the body after the disable
+        // byte are outside the v1 fixed layout and must be ignored, not treated
+        // as a malformed frame.
+        let mut body = encode_body(".", 0, None, 0, None, false);
+        body.extend_from_slice(b"future-field");
+        let mut frame = vec![PROTO_VERSION];
+        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&body);
+        assert!(c.write_raw(&frame));
+        let resp = c.read_response_timeout(2000)
+            .expect("trailing body bytes must be ignored, not disconnect");
+        check_response(&resp);
+    });
+}
+
+#[test]
+fn ipc_keymap_over_cap_disconnects_then_serves() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        let frame = encode_request(".", 0, Some(&"k".repeat(MAX_KEYMAP_LEN + 1)), 0, None, false);
+        assert!(c.write_raw(&frame));
+        let err = c.read_response_timeout(2000);
+        assert!(err.is_none(), "keymap over MAX_KEYMAP_LEN must disconnect, got {err:?}");
+
+        std::thread::sleep(Duration::from_millis(100));
+        let c2 = PipeClient::connect(1000).expect("reconnect after over-cap keymap");
+        assert!(c2.send_request(".", &props_empty()));
+        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
+        check_response(&resp);
+    });
+}
+
+#[test]
+fn ipc_config_over_cap_disconnects_then_serves() {
+    with_daemon(|| {
+        let c = PipeClient::connect(1000).expect("connect");
+        let frame = encode_request(".", 0, None, 0, Some(&"c".repeat(MAX_CONFIG_LEN + 1)), false);
+        assert!(c.write_raw(&frame));
+        let err = c.read_response_timeout(2000);
+        assert!(err.is_none(), "config over MAX_CONFIG_LEN must disconnect, got {err:?}");
+
+        std::thread::sleep(Duration::from_millis(100));
+        let c2 = PipeClient::connect(1000).expect("reconnect after over-cap config");
+        assert!(c2.send_request(".", &props_empty()));
+        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
+        check_response(&resp);
+    });
+}
+
+#[test]
+fn ipc_empty_format_serves_zero_len_prompt() {
+    // format = "" renders an empty prompt. The wire response [0u32][""] is
+    // valid: the daemon must serve it, not treat it as an error. (The psm1
+    // client rejects len-0 responses; that is a client-side quirk.)
+    with_daemon_config("format = \"\"\nadd_newline = false\n", || {
+        let c = PipeClient::connect(1000).expect("connect");
+        assert!(c.send_request(".", &props_empty()));
+        let resp = c.read_response_timeout(2000);
+        assert_eq!(resp, Some(String::new()),
+            "format = \"\" must render an empty (zero-length) prompt, got {resp:?}");
     });
 }

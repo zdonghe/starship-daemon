@@ -13,6 +13,7 @@ pub fn pipe_name() -> String {
 }
 
 pub mod cache;
+pub mod daemon;
 pub mod ffi;
 pub mod watch;
 pub mod gitignore;
@@ -202,7 +203,7 @@ mod tests {
 
     #[test]
     fn parse_request_empty_keymap_is_none() {
-        // keymap_len = 0 -> None -> daemon default ("vi" in main.rs).
+        // keymap_len = 0 -> None -> daemon default ("vi" in daemon.rs).
         let data = encode_request_v1(".", 0, None, 0, None, false);
         let req = parse_request(&data).unwrap();
         assert_eq!(req.props.keymap, None);

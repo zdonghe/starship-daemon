@@ -7,8 +7,6 @@ does the .gitignore work well right now?
 
 measure the time of &oldPrompt
 
-verify testing methodology
-
 
 suppression:
 Why dropping those events is safe

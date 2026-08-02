@@ -21,8 +21,8 @@ const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
 const CHANGE_BUF_SIZE: u32 = 65536;
 
 // Max concurrently watched repos. The daemon's wait set is the session events
-// (MAX_SESSIONS in main.rs) plus MAX_WATCHED_REPOS watcher events; must stay
-// under MAXIMUM_WAIT_OBJECTS (64), enforced by a compile-time assert in main.rs.
+// (MAX_SESSIONS in server.rs) plus MAX_WATCHED_REPOS watcher events; must stay
+// under MAXIMUM_WAIT_OBJECTS (64), enforced by a compile-time assert in server.rs.
 pub const MAX_WATCHED_REPOS: usize = 16;
 
 // Overhead measurement for the watcher. All collection is gated by

@@ -468,7 +468,7 @@ fn ipc_stalled_client_does_not_freeze_daemon() {
         let a = PipeClient::connect(1000).expect("A connect");
         // Send 4 of the 5 header bytes, then stall. The async read state
         // machine must not block other sessions while A's header is incomplete
-        // (main.rs:183). cwd="." -> body is 18 bytes.
+        // (server.rs:issue_read_at). cwd="." -> body is 18 bytes.
         assert!(a.write_raw(&[PROTO_VERSION, 18, 0, 0]));
         std::thread::sleep(Duration::from_millis(300));
 
@@ -507,7 +507,7 @@ fn ipc_fragmented_header_accumulates() {
         let c = PipeClient::connect(1000).expect("connect");
         // Split the 5-byte header across two writes, then the 5th byte and the
         // full body. The state machine must accumulate partial reads, not
-        // disconnect (main.rs:183). cwd="." -> body is 18 bytes.
+        // disconnect (server.rs:issue_read_at). cwd="." -> body is 18 bytes.
         assert!(c.write_raw(&[PROTO_VERSION, 18]));
         std::thread::sleep(Duration::from_millis(100));
         assert!(c.write_raw(&[0, 0]));
@@ -843,7 +843,7 @@ fn ipc_total_len_over_cap_disconnects_then_serves() {
     with_daemon(|| {
         let c = PipeClient::connect(1000).expect("connect");
         // Declared total_len = MAX_TOTAL_LEN + 1 pushes the frame over the
-        // 65536 cap. The header stage (main.rs) must disconnect without
+        // 65536 cap. The header stage (server.rs) must disconnect without
         // reading a body.
         let mut frame = vec![PROTO_VERSION];
         frame.extend_from_slice(&(MAX_TOTAL_LEN as u32 + 1).to_le_bytes());

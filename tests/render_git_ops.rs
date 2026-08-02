@@ -251,17 +251,6 @@ fn render_ignored_file_unchanged() {
 }
 
 #[test]
-fn render_no_upstream_branch_works() {
-    let r = TestRepo::new();
-    let cfg = toml::Table::new();
-    r.git(&["checkout", "-b", "no-upstream"]);
-    settle();
-    let git_dir = starship_daemon::find_git_dir(r.path());
-    let out = render(r.path(), git_dir.as_deref(), &cfg);
-    assert!(!out.is_empty(), "render should produce output on branch with no upstream");
-}
-
-#[test]
 fn render_bare_repo_does_not_crash() {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("repo.git");

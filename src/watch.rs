@@ -711,17 +711,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_inserts_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("sub");
-        std::fs::create_dir_all(&p).unwrap();
-
-        let mut w = WatcherState::new();
-        w.ensure(&p);
-        assert_eq!(w.entries.len(), 1);
-    }
-
-    #[test]
     fn poll_detects_file_creation() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub");

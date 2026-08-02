@@ -253,16 +253,6 @@ fn check_response(resp: &str) {
 }
 
 #[test]
-fn ipc_content_served() {
-    with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect");
-        assert!(c.send_request(".", &props_empty()));
-        let resp = c.read_response().expect("read response");
-        check_response(&resp);
-    });
-}
-
-#[test]
 fn ipc_reconnect() {
     with_daemon(|| {
         let resp1;

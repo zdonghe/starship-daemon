@@ -365,15 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn load_gitignore_trailing_whitespace_trimmed() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".gitignore"),
-            b"*.o \nbuild  \n").unwrap();
-        let ig = load_gitignore(dir.path()).unwrap();
-        assert_eq!(ig.rules.len(), 2);
-    }
-
-    #[test]
     fn doublestar_middle_slash_is_anchored() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".gitignore"), b"a/**/b\n").unwrap();

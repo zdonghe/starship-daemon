@@ -147,7 +147,6 @@ function Disable-StarshipDaemon
 
 $MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = { Disable-StarshipDaemon }
 
-# Auto-start daemon on import
 Start-StarshipDaemon
 
 # Continuation prompt matching starship default

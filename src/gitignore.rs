@@ -64,7 +64,7 @@ pub fn is_ignored_str(ig: &GitignoreFilter, event_path: &str) -> bool {
 }
 
 pub fn component_match(pattern: &str, name: &str) -> bool {
-    fn match_rec(p: &str, n: &str) -> bool {
+    fn match_component(p: &str, n: &str) -> bool {
         if p.is_empty() {
             return n.is_empty();
         }
@@ -75,38 +75,58 @@ pub fn component_match(pattern: &str, name: &str) -> bool {
         let pc = p.chars().next().unwrap();
         match pc {
             '*' => {
-                match_rec(&p[pc.len_utf8()..], n)
-                    || match_rec(p, &n[n.chars().next().unwrap().len_utf8()..])
+                match_component(&p[pc.len_utf8()..], n)
+                    || match_component(p, &n[n.chars().next().unwrap().len_utf8()..])
             }
-            '?' => match_rec(&p[pc.len_utf8()..], &n[n.chars().next().unwrap().len_utf8()..]),
+            '?' => match_component(&p[pc.len_utf8()..], &n[n.chars().next().unwrap().len_utf8()..]),
             c => {
                 let nc = n.chars().next().unwrap();
-                if c == nc {
-                    match_rec(&p[pc.len_utf8()..], &n[nc.len_utf8()..])
-                } else {
-                    false
-                }
+                c == nc && match_component(&p[pc.len_utf8()..], &n[nc.len_utf8()..])
             }
         }
     }
 
-    match_rec(pattern, name)
+    match_component(pattern, name)
 }
 
 pub fn path_match(parts: &[String], path_comps: &[&str], anchored: bool) -> bool {
-    let has_ds = parts.iter().any(|p| p == "**");
+    if parts.iter().any(|p| p == "**") {
+        return match_with_doublestar(parts, path_comps, anchored);
+    }
+    match parts.len() {
+        1 => match_single_component(&parts[0], path_comps, anchored),
+        n if n <= path_comps.len() => match_leading_components(parts, path_comps),
+        _ => false,
+    }
+}
 
-    fn match_inner(pi: usize, ci: usize, parts: &[String], comps: &[&str]) -> bool {
+fn match_single_component(part: &str, path_comps: &[&str], anchored: bool) -> bool {
+    if anchored {
+        path_comps.first().map_or(false, |c| component_match(part, c))
+    } else {
+        path_comps.iter().any(|c| component_match(part, c))
+    }
+}
+
+// Multi-component patterns with no "**" are anchored by construction (a "/" in
+// a pattern implies anchoring in gitignore), so compare the leading prefix.
+fn match_leading_components(parts: &[String], path_comps: &[&str]) -> bool {
+    parts.iter().zip(path_comps.iter()).all(|(p, c)| component_match(p, c))
+}
+
+fn match_with_doublestar(parts: &[String], path_comps: &[&str], anchored: bool) -> bool {
+    fn walk(pi: usize, ci: usize, parts: &[String], comps: &[&str]) -> bool {
         if pi == parts.len() {
             return ci == comps.len();
         }
         if parts[pi] == "**" {
             let remaining = parts.len() - pi - 1;
-            let is_trailing = remaining == 0;
-            let min_consume = if is_trailing && parts.len() > 1 { 1 } else { 0 };
+            // A trailing "**" after other parts must consume at least one
+            // component, so "a/**" does not also match "a" itself.
+            let min_consume = if remaining == 0 && parts.len() > 1 { 1 } else { 0 };
             let max = comps.len().saturating_sub(remaining);
             for end in (ci + min_consume)..=max {
-                if match_inner(pi + 1, end, parts, comps) {
+                if walk(pi + 1, end, parts, comps) {
                     return true;
                 }
             }
@@ -114,33 +134,15 @@ pub fn path_match(parts: &[String], path_comps: &[&str], anchored: bool) -> bool
         }
         if ci >= comps.len() { return false; }
         if component_match(&parts[pi], comps[ci]) {
-            return match_inner(pi + 1, ci + 1, parts, comps);
+            return walk(pi + 1, ci + 1, parts, comps);
         }
         false
     }
 
-    if has_ds {
-        if anchored {
-            match_inner(0, 0, parts, path_comps)
-        } else {
-            for start in 0..=path_comps.len() {
-                if match_inner(0, start, parts, path_comps) {
-                    return true;
-                }
-            }
-            false
-        }
-    } else if parts.len() == 1 {
-        if anchored {
-            path_comps.first().map_or(false, |c| component_match(&parts[0], c))
-        } else {
-            path_comps.iter().any(|c| component_match(&parts[0], c))
-        }
-    } else if parts.len() <= path_comps.len() {
-        let anchored_path = &path_comps[..parts.len()];
-        parts.iter().zip(anchored_path.iter()).all(|(p, c)| component_match(p, c))
+    if anchored {
+        walk(0, 0, parts, path_comps)
     } else {
-        false
+        (0..=path_comps.len()).any(|start| walk(0, start, parts, path_comps))
     }
 }
 

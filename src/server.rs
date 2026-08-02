@@ -30,8 +30,8 @@ const _: () = assert!(MAX_SESSIONS + MAX_WATCHED_REPOS <= 64);
 
 #[derive(Clone, Copy)]
 enum ReadStage {
-    Header, // 5 bytes: [u8 version][u32 LE total_len]
-    Body,   // total_len bytes of body
+    Header,
+    Body,
 }
 
 // The one outstanding overlapped op. Never Idle at rest: Connect (parked in
@@ -320,7 +320,6 @@ fn service_session(s: &mut Session, state: &mut DaemonState) {
 }
 
 fn stage_response(s: &mut Session, output: &str) {
-    // [u32 LE len][prompt utf8]; len = prompt.len().
     let mut wb = Vec::with_capacity(4 + output.len());
     wb.extend_from_slice(&(output.len() as u32).to_le_bytes());
     wb.extend_from_slice(output.as_bytes());
@@ -354,8 +353,6 @@ fn service_signaled_sessions(sessions: &mut [Session], state: &mut DaemonState) 
         s.last_activity = Instant::now();
         service_session(s, state);
     }
-    // 9th connected session is transient; evict the least-recently-active so a
-    // free instance stays available for a queued client.
     if sessions.iter().filter(|s| s.connected).count() >= MAX_SESSIONS {
         if let Some(i) = sessions.iter().enumerate()
             .filter(|(_, s)| s.connected)

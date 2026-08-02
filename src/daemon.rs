@@ -12,7 +12,6 @@ pub enum DaemonError {
     BadFrame,
 }
 
-// Daemon-global state: config tracking, the render cache, the repo watcher.
 pub struct DaemonState {
     pub config_path: PathBuf,
     pub cached_config: toml::Table,

@@ -10,56 +10,6 @@ measure the time of &oldPrompt
 verify testing methodology
 
 
-Wire format
-REQUEST
-[u8 version = 1]
-[u32 LE total_len]            bytes after this field; valid 17..=65536
-[u32 LE cwd_len][cwd utf8]    cap 32768; lossy decode (unchanged behavior)
-[i32 LE status_code]
-[u16 LE keymap_len][keymap utf8]   strict; empty -> None -> "vi" fallback
-[u32 LE terminal_width]
-[u16 LE config_len][config utf8]   strict; empty -> None (keep current config)
-[u8 disable_cache]            0 or 1 only
-
-RESPONSE
-[u8 status]                   0 = ok, 1 = error
-[u32 LE len][prompt utf8]     len 0 when status = 1
-Typical request ~67 bytes vs today's ~100+ JSON. Not the point, but free.
-Decode rules (strict, replaces lenient parse)
-Case	Action
-version != 1	error (status=1)
-total_len < 17 or > 65536	error (cap before alloc)
-any field overruns total_len	error (truncated)
-cwd invalid UTF-8	lossy, keep serving (pinned by existing test)
-keymap/config invalid UTF-8	error (matches today's strict props)
-disable_cache not 0/1	error
-keymap_len > 256	error (sanity cap; real values vi/emacs)
-trailing bytes after known fields	ignored - this IS the forward-compat mechanism
-Never require full consumption, never reorder/retype existing fields, caps flat-or-grow.
-Changes by file
-src/lib.rs
-- Delete ClientProps::parse_json (:58-96) and parse_request's props_len branch (:109-113).
-- New ClientProps::decode(&[u8]) -> Option<ClientProps>; rewrite parse_request (:104) to read [version][total_len] then decode fields.
-- Tests: delete 15 parse_json_* tests; add decode tests (round-trip all fields, empty->None for keymap/config, version reject, truncation, trailing-bytes ignored, invalid disable_cache, non-UTF-8 keymap/config). Rewrite the 8 parse_request_* tests for the new framing (keep intent of cwd_len_overflow, non_utf8_cwd, zero_cwd; props_len_overflow -> total_len-cap; zero_props -> minimal-body).
-src/main.rs
-- read_request (:101): read 1 byte version + 4 bytes total_len, validate, grow a Vec to total_len, read_exact. Cap check before allocation.
-- send_response (:93): prepend status byte. pipe_error! (:18) writes [1][len 0] then disconnects, so the client can distinguish "render failed" from a clean response.
-- handle_client (:117): survives almost untouched - empty keymap/config already decode to None, so unwrap_or("vi") and the p != *config_path guard keep working.
-starship-daemon.psm1
-- Get-StarshipPrompt (:30-45): JSON string concat -> MemoryStream + BinaryWriter byte assembly, single Write + Flush. Kills the quote/backslash escaping footgun entirely.
-- Always send all fields; starship_config = $env:STARSHIP_CONFIG (empty when unset), disable_cache = $env:STARSHIP_DAEMON_CACHE -eq "0". $script:LastStarshipConfig tracking deleted - the daemon's p != *config_path guard makes it redundant.
-- Response read (:53-72): read status byte first; status != 0 -> $null -> fallback prompt.
-tests/ipc.rs
-- send_request(&self, cwd, props: &str) (:43) -> send_request(&self, cwd, props: &[u8]) plus an encode_props(status, keymap, width, config, disable) helper. 10 call sites (:184-324) updated ("{}" -> all-None, {"status_code":0} -> Some(0), {"disable_cache":true} -> Some(true)).
-- read_response (:58): consume the status byte first.
-- ipc_mid_request_disconnect still valid (AAAA = total_len overflow -> clean error).
-Behavior changes (the sign-off list)
-1. Malformed body: lenient partial-accept -> strict error (status=1). This is (c).
-2. Empty keymap: Some("") bypassing the "vi" fallback -> None -> "vi". Fixes a latent bug.
-3. Framing: two-prefix+JSON -> version+single-prefix+binary; message cap 36872 -> 65536.
-4. Response gains status byte; error responses distinguishable.
-5. psm1: config always sent, LastStarshipConfig deleted, no more string escaping.
-
 suppression:
 Why dropping those events is safe
 Key facts from the code:

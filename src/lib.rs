@@ -1,6 +1,8 @@
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use lru::LruCache;
 
 pub const PIPE_NAME: &str = r"\\.\pipe\starship-daemon";
 
@@ -37,24 +39,21 @@ fn find_git_dir_uncached(cwd: &Path) -> Option<PathBuf> {
 
 pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
     use std::sync::LazyLock;
-    static CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static CACHE: LazyLock<Mutex<LruCache<PathBuf, Option<PathBuf>>>> =
+        LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap())));
     let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(result) = cache.get(cwd) {
         return result.clone();
     }
     let actual = if cwd.as_os_str().is_empty() { Path::new(".") } else { cwd };
     let result = find_git_dir_uncached(actual);
-    if cache.len() >= 64 {
-        cache.clear();
-    }
-    cache.insert(actual.to_path_buf(), result.clone());
+    cache.put(actual.to_path_buf(), result.clone());
     result
 }
 
 // v1 binary wire protocol.
 //
-// REQUEST  [u8 version=1][u32 LE total_len][body]     max frame 65536 = BUF_SIZE
+// REQUEST  [u8 version=1][u32 LE total_len][body]     max frame 65536 = MAX_FRAME_LEN
 // body     [u32 cwd_len][cwd lossy cap 32768]
 //          [i32 status][u16 keymap_len][keymap lossy cap 256, empty -> None]
 //          [u32 width][u16 config_len][config lossy cap 4096, empty -> None]

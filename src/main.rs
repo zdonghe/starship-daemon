@@ -9,7 +9,7 @@ use lru::LruCache;
 use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
 use starship_daemon::ffi::{self, HANDLE, DWORD, LPVOID, LPCVOID};
 use starship_daemon::watch::{WatcherState, MAX_WATCHED_REPOS, STATS_ENABLED, drain_stats};
-use starship_daemon::{ParsedRequest, parse_request, PROTO_VERSION, HEADER_LEN, MAX_TOTAL_LEN};
+use starship_daemon::{ParsedRequest, parse_request, PROTO_VERSION, HEADER_LEN, MAX_FRAME_LEN, MAX_TOTAL_LEN};
 
 const PIPE_ACCESS_DUPLEX: DWORD = 3;
 const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
@@ -28,10 +28,12 @@ const PIPE_READMODE_BYTE: DWORD = 0;
 // Both are bounded by the 9-instance cap and self-heal under pressure.
 const MAX_SESSIONS: usize = 9;
 const MAX_REQS_PER_WAKE: u32 = 8;
-// Max frame: [u8 version][u32 LE total_len][body] = 5 + 65531 = 65536. The body
-// caps (cwd 32768, keymap 256, config 4096) plus fixed fields total ~37 KiB; the
-// headroom is forward-compat slack. Must equal MAX_FRAME_LEN in lib.rs.
-const BUF_SIZE: usize = 65536;
+// Max frame: [u8 version][u32 LE total_len][body] = 5 + 65531 = 65536. MAX_FRAME_LEN
+// in lib.rs is the single source of truth: Session.buf and the pipe in/out
+// buffers all use it, so want (= 5 + total_len <= MAX_FRAME_LEN, enforced at the
+// header stage) can never outgrow buf. The body caps (cwd 32768, keymap 256,
+// config 4096) plus fixed fields total ~37 KiB; the headroom is forward-compat
+// slack.
 
 // The wait set shares MAXIMUM_WAIT_OBJECTS (64); the session events and watcher
 // change events are the only handles in it. Compile-time guard against silent
@@ -48,7 +50,7 @@ struct Session {
     pipe: HANDLE,
     ol: ffi::OVERLAPPED,
     event: HANDLE,
-    buf: [u8; BUF_SIZE],
+    buf: [u8; MAX_FRAME_LEN],
     active: bool,
     sync_bytes: u32,
     read_in_flight: bool,
@@ -66,7 +68,7 @@ impl Session {
             pipe,
             ol: unsafe { mem::zeroed() },
             event,
-            buf: [0u8; BUF_SIZE],
+            buf: [0u8; MAX_FRAME_LEN],
             active: false,
             sync_bytes: 0,
             read_in_flight: false,
@@ -78,17 +80,51 @@ impl Session {
             last_activity: Instant::now(),
         }
     }
+
+    // Re-arm for the next request header. Sets exactly stage/want/got; it must
+    // NOT touch sync_bytes / read_in_flight / write_in_flight - disconnect
+    // clears those itself after its cancellation wait (see disconnect_session),
+    // and service_session zeroes sync_bytes as it consumes it.
+    fn reset_read_state(&mut self) {
+        self.stage = ReadStage::Header;
+        self.want = HEADER_LEN;
+        self.got = 0;
+    }
+}
+
+// Daemon-global state threaded through request handling: config file tracking,
+// the render cache, and the repo watcher. Single-threaded event loop, all owned
+// by main, so one bundle instead of six &mut params.
+struct DaemonState {
+    config_path: PathBuf,
+    cached_config: toml::Table,
+    last_cfg_mtime: u64,
+    lru: LruCache<CacheKey, CachedValue>,
+    watcher: WatcherState,
+}
+
+impl DaemonState {
+    // Reload core: re-read the config file, drop all cached renders and repo
+    // versions, refresh the mtime. Shared by the explicit STARSHIP_CONFIG
+    // change path and the mtime-change path. The explicit path additionally
+    // repoints the STARSHIP_CONFIG env var (caller does that; it must not be
+    // bundled here or every mtime edit would overwrite the env var).
+    fn reload_config(&mut self) {
+        self.cached_config = cache::read_config(&self.config_path);
+        self.lru.clear();
+        cache::clear_repo_cache();
+        self.last_cfg_mtime = cache::get_mtime_ns(&self.config_path);
+    }
 }
 
 enum IssueOutcome { Sync, Pending, Error }
 
 fn issue_read_at(s: &mut Session, offset: usize, count: usize) -> IssueOutcome {
     unsafe {
-        s.ol = mem::zeroed();
-        s.ol.h_event = s.event;
-        ffi::ResetEvent(s.event);
+        debug_assert!(offset + count <= s.buf.len());
+        let ol = begin_op(s);
         let mut read: DWORD = 0;
-        let ret = ffi::ReadFile(s.pipe, s.buf.as_mut_ptr().add(offset) as LPVOID, count as DWORD, &mut read, &mut s.ol as *mut _ as *mut c_void);
+        let ret = ffi::ReadFile(s.pipe, s.buf.as_mut_ptr().add(offset) as LPVOID, count as DWORD, &mut read, ol);
         if ret != 0 {
             if read == 0 { return IssueOutcome::Error; }
             s.sync_bytes = read;
@@ -104,25 +140,49 @@ fn issue_read_at(s: &mut Session, offset: usize, count: usize) -> IssueOutcome {
     }
 }
 
-fn complete_read(s: &mut Session) -> Option<u32> {
+// Begin a fresh overlapped op: zero the OVERLAPPED, bind the event, clear any
+// stale signal. Order matters - zero before h_event so the OVERLAPPED is clean
+// before reuse, ResetEvent before issuing so a stale completion cannot be
+// mis-read as belonging to this op (the race documented in disconnect_session).
+fn begin_op(s: &mut Session) -> *mut c_void {
+    unsafe {
+        s.ol = mem::zeroed();
+        s.ol.h_event = s.event;
+        ffi::ResetEvent(s.event);
+        &mut s.ol as *mut _ as *mut c_void
+    }
+}
+
+// Poll a completed overlapped op: Some(n) = finished (n bytes, or 0 = broken),
+// None = still in flight. `expected` is Some for a write and gates a short
+// completion (bytes != write_buf.len()) into Some(0) so the caller disconnects
+// instead of resuming in a half-written state.
+fn complete_op(s: &mut Session, expected: Option<usize>) -> Option<u32> {
     unsafe {
         let mut bytes: DWORD = 0;
         let ok = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 0);
-        if ok != 0 { return Some(bytes); }
+        if ok != 0 {
+            if let Some(len) = expected {
+                if bytes != len as DWORD { return Some(0); }
+            }
+            return Some(bytes);
+        }
         if ffi::GetLastError() == ffi::ERROR_IO_INCOMPLETE { return None; }
         Some(0)
     }
 }
 
+fn complete_read(s: &mut Session) -> Option<u32> { complete_op(s, None) }
+
+fn complete_write(s: &mut Session) -> Option<u32> { complete_op(s, Some(s.write_buf.len())) }
+
 enum WriteIssue { Done, Pending, Error }
 
 fn issue_write(s: &mut Session) -> WriteIssue {
     unsafe {
-        s.ol = mem::zeroed();
-        s.ol.h_event = s.event;
-        ffi::ResetEvent(s.event);
+        let ol = begin_op(s);
         let mut w: DWORD = 0;
-        let ret = ffi::WriteFile(s.pipe, s.write_buf.as_ptr() as LPCVOID, s.write_buf.len() as DWORD, &mut w, &mut s.ol as *mut _ as *mut c_void);
+        let ret = ffi::WriteFile(s.pipe, s.write_buf.as_ptr() as LPCVOID, s.write_buf.len() as DWORD, &mut w, ol);
         if ret != 0 { return WriteIssue::Done; }
         let err = ffi::GetLastError();
         if err == ERROR_IO_PENDING {
@@ -133,23 +193,10 @@ fn issue_write(s: &mut Session) -> WriteIssue {
     }
 }
 
-fn complete_write(s: &mut Session) -> Option<u32> {
-    unsafe {
-        let mut bytes: DWORD = 0;
-        let ok = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 0);
-        if ok != 0 && bytes == s.write_buf.len() as DWORD { return Some(bytes); }
-        if ok != 0 { return Some(0); }
-        if ffi::GetLastError() == ffi::ERROR_IO_INCOMPLETE { return None; }
-        Some(0)
-    }
-}
-
 fn rearm_connect(s: &mut Session) {
     unsafe {
-        s.ol = mem::zeroed();
-        s.ol.h_event = s.event;
-        ffi::ResetEvent(s.event);
-        let ret = ffi::ConnectNamedPipe(s.pipe, &mut s.ol as *mut _ as *mut c_void);
+        let ol = begin_op(s);
+        let ret = ffi::ConnectNamedPipe(s.pipe, ol);
         if ret != 0 || ffi::GetLastError() == ERROR_PIPE_CONNECTED {
             ffi::SetEvent(s.event);
         }
@@ -173,20 +220,11 @@ fn disconnect_session(s: &mut Session) {
     s.write_in_flight = false;
     s.write_buf.clear();
     s.sync_bytes = 0;
-    s.stage = ReadStage::Header;
-    s.want = HEADER_LEN;
-    s.got = 0;
+    s.reset_read_state();
     rearm_connect(s);
 }
 
-fn service_session(
-    s: &mut Session,
-    config_path: &mut PathBuf,
-    cached_config: &mut toml::Table,
-    last_cfg_mtime: &mut u64,
-    lru: &mut LruCache<CacheKey, CachedValue>,
-    watcher: &mut WatcherState,
-) {
+fn service_session(s: &mut Session, state: &mut DaemonState) {
     let mut served = 0u32;
     loop {
         // Consume whatever operation completed (write, sync read, or pending read).
@@ -242,14 +280,12 @@ fn service_session(
                     s.want = HEADER_LEN + total_len;
                 }
                 ReadStage::Body => {
-                    if !process_request(s, s.want, config_path, cached_config, last_cfg_mtime, lru, watcher) {
+                    if !process_request(s, s.want, state) {
                         disconnect_session(s);
                         return;
                     }
                     served += 1;
-                    s.stage = ReadStage::Header;
-                    s.want = HEADER_LEN;
-                    s.got = 0;
+                    s.reset_read_state();
                     // Issue the staged response asynchronously; never block the
                     // daemon on a full out-buffer. A Pending write returns to
                     // the event loop and resumes when the client drains.
@@ -278,7 +314,7 @@ fn service_session(
     }
 }
 
-fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cached_config: &mut toml::Table, last_cfg_mtime: &mut u64, lru: &mut LruCache<CacheKey, CachedValue>, watcher: &mut WatcherState) -> bool {
+fn process_request(s: &mut Session, total: usize, state: &mut DaemonState) -> bool {
     let ParsedRequest { cwd, props } = match parse_request(&s.buf[..total]) { Some(r) => r, None => { return false; } };
     // Lenient empty cwd: feed "." so rendering never sees a zero-length path.
     let cwd = if cwd.as_os_str().is_empty() { PathBuf::from(".") } else { cwd };
@@ -289,53 +325,49 @@ fn process_request(s: &mut Session, total: usize, config_path: &mut PathBuf, cac
     let mut cfg_changed = false;
     if let Some(ref req) = props.starship_config {
         let p = Path::new(req);
-        if p != config_path.as_path() {
+        if p != state.config_path.as_path() {
             if let Some(new_cfg) = cache::load_config(&p) {
-                *config_path = new_cfg;
-                lru.clear();
-                cache::clear_repo_cache();
+                state.config_path = new_cfg;
+                // Explicit STARSHIP_CONFIG change: repoint the env var so child
+                // starship rendering follows the new config, then reload.
                 unsafe { std::env::set_var("STARSHIP_CONFIG", req); }
-                *cached_config = cache::read_config(config_path);
-                *last_cfg_mtime = cache::get_mtime_ns(config_path);
+                state.reload_config();
                 cfg_changed = true;
             }
         }
     }
 
     let cur_cfg_mtime = if !cfg_changed {
-        let mtime = cache::get_mtime_ns(config_path);
-        if mtime != *last_cfg_mtime {
-            *last_cfg_mtime = mtime;
-            *cached_config = cache::read_config(config_path);
-            lru.clear();
-            cache::clear_repo_cache();
+        let mtime = cache::get_mtime_ns(&state.config_path);
+        if mtime != state.last_cfg_mtime {
+            state.reload_config();
         }
         mtime
     } else {
-        *last_cfg_mtime
+        state.last_cfg_mtime
     };
 
     let tw = props.terminal_width;
 
     if props.disable_cache {
         let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
-        let output = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), cached_config);
+        let output = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &state.cached_config);
         stage_response(s, &output);
         return true;
     }
 
     let repo_root = git_dir.as_ref().and_then(|g| g.parent());
     let watcher_version = if let Some(r) = repo_root {
-        watcher.ensure(r);
-        watcher.flush();
-        watcher.version(r)
+        state.watcher.ensure(r);
+        state.watcher.flush();
+        state.watcher.version(r)
     } else {
         0
     };
     let ck = cache::compute_cache_key(&cwd, &keymap, tw, cur_cfg_mtime, watcher_version);
     let ctx = RenderContext { cwd: cwd.clone(), terminal_width: tw, status_code, keymap };
 
-    let output = cache::render_cached(&ctx, git_dir.as_deref(), cached_config, &ck, lru);
+    let output = cache::render_cached(&ctx, git_dir.as_deref(), &state.cached_config, &ck, &mut state.lru);
     stage_response(s, &output);
     true
 }
@@ -348,21 +380,10 @@ fn stage_response(s: &mut Session, output: &str) {
     s.write_buf = wb;
 }
 
-fn main() {
-    let config_path = cache::default_config_path();
-    let mut config_path = match cache::load_config(&config_path) {
-        Some(p) => p,
-        None => { eprintln!("Could not load config"); std::process::exit(1); }
-    };
-    let mut lru: LruCache<CacheKey, CachedValue> = LruCache::new(NonZeroUsize::new(256).unwrap());
-    let mut cached_config = cache::read_config(&config_path);
-    let mut last_cfg_mtime = cache::get_mtime_ns(&config_path);
-    let pipe_name = starship_daemon::pipe_name();
-    let wide = ffi::to_wide(&pipe_name);
-
+fn create_sessions(pipe_name: &[u16]) -> Vec<Session> {
     let mut sessions = Vec::with_capacity(MAX_SESSIONS);
     for _ in 0..MAX_SESSIONS {
-        let pipe = unsafe { ffi::CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, MAX_SESSIONS as DWORD, 65536, 65536, 0, std::ptr::null()) };
+        let pipe = unsafe { ffi::CreateNamedPipeW(pipe_name.as_ptr(), PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE|PIPE_WAIT, MAX_SESSIONS as DWORD, MAX_FRAME_LEN as DWORD, MAX_FRAME_LEN as DWORD, 0, std::ptr::null()) };
         if pipe == ffi::INVALID_HANDLE_VALUE { std::process::exit(1); }
         let mode = PIPE_READMODE_BYTE;
         unsafe { ffi::SetNamedPipeHandleState(pipe, &mode as *const _ as *mut _, std::ptr::null_mut(), std::ptr::null_mut()); }
@@ -370,7 +391,61 @@ fn main() {
         if event.is_null() { std::process::exit(1); }
         sessions.push(Session::new(pipe, event));
     }
+    sessions
+}
 
+// Service every signaled session this wake, then rotate slots if all are
+// active. Servicing every signaled session (rather than WFMO's lowest-index
+// result) prevents a firehose session that self-wakes (SetEvent at the
+// MAX_REQS_PER_WAKE cap) from re-selecting itself and starving higher-index
+// sessions. Rotation is connect-driven: it runs only on a wake that serviced
+// a connect, so a queued client always finds a free instance.
+fn service_signaled_sessions(sessions: &mut [Session], state: &mut DaemonState) {
+    for idx in 0..sessions.len() {
+        let ev = sessions[idx].event;
+        if unsafe { ffi::WaitForSingleObject(ev, 0) } != ffi::WAIT_OBJECT_0 { continue; }
+        let s = &mut sessions[idx];
+        s.last_activity = Instant::now();
+        if s.active {
+            service_session(s, state);
+        } else {
+            s.active = true;
+            match issue_read_at(s, 0, HEADER_LEN) {
+                IssueOutcome::Sync => service_session(s, state),
+                IssueOutcome::Pending => {}
+                IssueOutcome::Error => disconnect_session(s),
+            }
+        }
+    }
+    // Eager slot rotation: a 9th active session is transient. Evict the
+    // least-recently-active session so a free instance always remains for a
+    // queued client.
+    if sessions.iter().filter(|s| s.active).count() >= MAX_SESSIONS {
+        if let Some(i) = sessions.iter().enumerate()
+            .filter(|(_, s)| s.active)
+            .min_by_key(|(_, s)| s.last_activity)
+            .map(|(i, _)| i)
+        {
+            disconnect_session(&mut sessions[i]);
+        }
+    }
+}
+
+fn main() {
+    let config_path = cache::default_config_path();
+    let config_path = match cache::load_config(&config_path) {
+        Some(p) => p,
+        None => { eprintln!("Could not load config"); std::process::exit(1); }
+    };
+    let lru: LruCache<CacheKey, CachedValue> = LruCache::new(NonZeroUsize::new(256).unwrap());
+    let cached_config = cache::read_config(&config_path);
+    let last_cfg_mtime = cache::get_mtime_ns(&config_path);
+    let mut state = DaemonState { config_path, cached_config, last_cfg_mtime, lru, watcher: WatcherState::new() };
+
+    let pipe_name = starship_daemon::pipe_name();
+    let wide = ffi::to_wide(&pipe_name);
+
+    let mut sessions = create_sessions(&wide);
     for s in &mut sessions { rearm_connect(s); }
     println!("starship-daemon started on {}", pipe_name);
 
@@ -392,15 +467,14 @@ fn main() {
         let warm_key = cache::compute_cache_key(
             Path::new("."), "vi", 120, 0, 0,
         );
-        let _ = cache::render_cached(&warm_ctx, None, &cached_config, &warm_key, &mut lru);
+        let _ = cache::render_cached(&warm_ctx, None, &state.cached_config, &warm_key, &mut state.lru);
     }
 
-    let mut watcher = WatcherState::new();
     let mut handles = Vec::with_capacity(MAX_SESSIONS + MAX_WATCHED_REPOS);
 
     loop {
         for s in &sessions { handles.push(s.event); }
-        for i in 0..watcher.num_entries() { handles.push(watcher.change_event(i)); }
+        for i in 0..state.watcher.num_entries() { handles.push(state.watcher.change_event(i)); }
         // Fully event-driven: no periodic tick. A connect, a client write, or a
         // watcher completion all wake the daemon via events.
         let total = handles.len() as DWORD;
@@ -413,41 +487,9 @@ fn main() {
             handles.clear();
             continue;
         }
-        watcher.process_signaled();
+        state.watcher.process_signaled();
         if rc >= ffi::WAIT_OBJECT_0 && rc < ffi::WAIT_OBJECT_0 + total {
-            // Service every signaled session, not just the lowest-index one.
-            // Otherwise a firehose session that self-wakes (SetEvent at the
-            // MAX_REQS_PER_WAKE cap) keeps re-selecting itself via WFMO and
-            // starves all higher-index sessions indefinitely.
-            for idx in 0..sessions.len() {
-                let ev = sessions[idx].event;
-                if unsafe { ffi::WaitForSingleObject(ev, 0) } != ffi::WAIT_OBJECT_0 { continue; }
-                let s = &mut sessions[idx];
-                s.last_activity = Instant::now();
-                if s.active {
-                    service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher);
-                } else {
-                    s.active = true;
-                    match issue_read_at(s, 0, HEADER_LEN) {
-                        IssueOutcome::Sync => service_session(s, &mut config_path, &mut cached_config, &mut last_cfg_mtime, &mut lru, &mut watcher),
-                        IssueOutcome::Pending => {}
-                        IssueOutcome::Error => disconnect_session(s),
-                    }
-                }
-            }
-            // Eager slot rotation: a 9th active session is transient. Evict the
-            // least-recently-active session so a free instance always remains for
-            // a queued client. Connect-driven (this very iteration serviced the
-            // connect), never a timer.
-            if sessions.iter().filter(|s| s.active).count() >= MAX_SESSIONS {
-                if let Some(i) = sessions.iter().enumerate()
-                    .filter(|(_, s)| s.active)
-                    .min_by_key(|(_, s)| s.last_activity)
-                    .map(|(i, _)| i)
-                {
-                    disconnect_session(&mut sessions[i]);
-                }
-            }
+            service_signaled_sessions(&mut sessions, &mut state);
         }
         handles.clear();
     }

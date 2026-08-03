@@ -12,23 +12,27 @@ pub struct GitignoreFilter {
     pub rules: Vec<Rule>,
 }
 
+// Parse one .gitignore line into a Rule. Returns None for empty lines,
+// comments, and patterns that reduce to nothing (e.g. a bare "/" or "!/").
+// Shared by load_gitignore (whole file) and the gitignore benchmark.
+pub fn parse_rule_line(line: &str) -> Option<Rule> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') { return None; }
+    let trimmed = line.strip_prefix('!').unwrap_or(line);
+    let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    let pattern = stripped.strip_suffix('/').unwrap_or(stripped);
+    let negate = line != trimmed;
+    let anchored = trimmed != stripped || (pattern.contains('/') && !pattern.starts_with("**/"));
+    let dir_only = stripped != pattern;
+    if pattern.is_empty() { return None; }
+    let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
+    Some(Rule { parts, negate, dir_only, anchored })
+}
+
 pub fn load_gitignore(repo_root: &Path) -> Option<GitignoreFilter> {
     let gitignore_path = repo_root.join(".gitignore");
     let content = fs::read_to_string(&gitignore_path).ok()?;
-    let mut rules = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        let trimmed = line.strip_prefix('!').unwrap_or(line);
-        let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
-        let pattern = stripped.strip_suffix('/').unwrap_or(stripped);
-        let negate = line != trimmed;
-        let anchored = trimmed != stripped || (pattern.contains('/') && !pattern.starts_with("**/"));
-        let dir_only = stripped != pattern;
-        if pattern.is_empty() { continue; }
-        let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
-        rules.push(Rule { parts, negate, dir_only, anchored });
-    }
+    let rules: Vec<Rule> = content.lines().filter_map(parse_rule_line).collect();
     if rules.is_empty() { return None; }
     Some(GitignoreFilter { rules })
 }

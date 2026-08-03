@@ -52,11 +52,13 @@ fn main() {
     println!("  LruCache::get:                       {:>8.1} ns", hit_ns);
 
     // ---------- cache key computation ----------
+    // Pure struct build - no syscalls. The caller passes the config mtime and
+    // watcher version in; compute_cache_key just packs them into a CacheKey.
     let n = 100;
     let start = Instant::now();
     for _ in 0..n { let _ = cache::compute_cache_key(&cwd, "viins", 120, 0, 0); }
     let key_us = start.elapsed().as_nanos() as f64 / n as f64 / 1000.0;
-    println!("  compute_cache_key (2 stats):         {:>8.1} us", key_us);
+    println!("  compute_cache_key:                    {:>8.1} us", key_us);
 
     // ---------- find_git_dir ----------
     let n = 10_000;

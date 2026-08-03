@@ -52,13 +52,13 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
     result
 }
 
-// v1 binary wire protocol.
+// Binary wire protocol.
 //
 // REQUEST  [u8 version=1][u32 LE total_len][body]     max frame 65536 = MAX_FRAME_LEN
 // body     [u32 cwd_len][cwd lossy cap 32768]
 //          [i32 status][u16 keymap_len][keymap lossy cap 256, empty -> None]
 //          [u32 width][u16 config_len][config lossy cap 4096, empty -> None]
-//          [u8 disable, non-zero -> true]
+//          [u8 disable cache, non-zero -> true]
 // RESPONSE [u32 LE len][prompt utf8]                  len = prompt.len()
 //
 // The header is 5 bytes and the frame is capped at 65536, so total_len must

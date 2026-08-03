@@ -4,19 +4,7 @@ use std::time::Instant;
 use starship_daemon::gitignore::{self, component_match, path_match, GitignoreFilter, Rule, is_ignored_str};
 
 fn make_filter(patterns: &[&str]) -> GitignoreFilter {
-    let rules: Vec<Rule> = patterns
-        .iter()
-        .map(|s| {
-            let negate = s.starts_with('!');
-            let trimmed = if negate { &s[1..] } else { s };
-            let anchored = trimmed.starts_with('/');
-            let stripped = if anchored { &trimmed[1..] } else { trimmed };
-            let dir_only = stripped.ends_with('/');
-            let pattern = if dir_only { &stripped[..stripped.len() - 1] } else { stripped };
-            let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
-            Rule { parts, negate, dir_only, anchored }
-        })
-        .collect();
+    let rules: Vec<Rule> = patterns.iter().filter_map(|s| gitignore::parse_rule_line(s)).collect();
     GitignoreFilter { rules }
 }
 
@@ -126,16 +114,6 @@ fn main() {
 
     println!();
 
-    // --- is_ignored (100 rules) ---
-    let many_patterns: Vec<String> = (0..100).map(|i| format!("*.ext{}", i)).collect();
-    let many: Vec<&str> = many_patterns.iter().map(|s| s.as_str()).collect();
-    let f100 = make_filter(&many);
-    bench_match(n_match, "100 rules, match first", &f100, &["test.ext0"]);
-    bench_match(n_match, "100 rules, match last", &f100, &["test.ext99"]);
-    bench_match(n_match, "100 rules, no match", &f100, &["test.txt"]);
-
-    println!();
-
     // --- directory-only (ancestor walk) ---
     let f_dir = make_filter(&["target/"]);
     bench_match(n_match, "dir rule, shallow", &f_dir, &["target"]);
@@ -226,7 +204,8 @@ fn main() {
     println!("\n--- benchmark methodology ---");
     println!("  load_gitignore: reads .gitignore from disk. {} iterations.", n_load);
     println!("  is_ignored: calls full filter. {} iterations per path.", n_match);
-    println!("  dwarfed by render_prompt (10-20ms) by factor > 1,000x.");
+    println!("  dwarfed by render_prompt (~0.7ms via IPC) by a large factor;");
+    println!("  the per-event cost that matters is this matcher, not the render.");
     println!("  {} path_match calls per is_ignored ancestor walk.", "O(depth*rules)");
     println!("  real file events are bounded by coalesced ReadDirectoryChangesW buffer.");
 }

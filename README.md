@@ -43,6 +43,8 @@ The watcher tracks the entire directory for changes, which tells us when to inva
 
 Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 
+In a stock build, starship exposes no segment API, so the whole rendered prompt is cached instead.
+
 ## Performance
 
 200 samples after 15 warmup rounds, measured from PowerShell client across three directories:
@@ -58,21 +60,14 @@ a non-git desktop folder, the [starship](https://github.com/starship/starship) r
 
 ## Build
 
-### Default (stock starship)
-
 ```
 cargo build --release
 ```
 
-The daemon uses the official `starship` crate from crates.io.
+The daemon auto-detects at build time (via `build.rs`) which starship it's compiled against:
 
-### Gix-native fork (optional)
-
-For faster git status, uncomment the `[patch.crates-io]` block in `Cargo.toml`:
-
-```
-cargo build --release
-```
+- **Default (stock starship)**: the `starship` crate resolves from crates.io. The daemon compiles with the stock render API.
+- **Gix-native fork (optional)**: a `[patch.crates-io]` block in `Cargo.toml` pointing at my personal starship fork (`github.com/zdonghe/starship`). When that patch is active, `build.rs` detects it from `Cargo.lock` and enables the fork's segment-level cache API.
 
 
 ## Benchmarking
@@ -92,7 +87,3 @@ $env:STARSHIP_DAEMON_PATH_GIX = "C:\path\to\starship-daemon-gix.exe"
 
 benches/bench-all.ps1
 ```
-
-## Future
-
-Making subdirectories in `.gitignore` be ignored by the daemon.

@@ -13,8 +13,7 @@ pub struct GitignoreFilter {
 }
 
 // Parse one .gitignore line into a Rule. Returns None for empty lines,
-// comments, and patterns that reduce to nothing (e.g. a bare "/" or "!/").
-// Shared by load_gitignore (whole file) and the gitignore benchmark.
+// comments, and patterns that reduce to nothing (a bare "/" or "!/").
 pub fn parse_rule_line(line: &str) -> Option<Rule> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') { return None; }
@@ -112,8 +111,8 @@ fn match_single_component(part: &str, path_comps: &[&str], anchored: bool) -> bo
     }
 }
 
-// Multi-component patterns with no "**" are anchored by construction (a "/" in
-// a pattern implies anchoring in gitignore), so compare the leading prefix.
+// No "**" means anchored (a "/" in a pattern implies anchoring); compare the
+// leading prefix.
 fn match_leading_components(parts: &[String], path_comps: &[&str]) -> bool {
     parts.iter().zip(path_comps.iter()).all(|(p, c)| component_match(p, c))
 }

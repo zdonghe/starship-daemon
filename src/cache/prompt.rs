@@ -206,21 +206,16 @@ pub fn render_cached(
     let tb = crate::cache::current_minute();
     let resolved_gd = git_dir.map(Path::to_path_buf);
 
-    // Path 1: Full hit, time_bucket still current and exit code unchanged.
-    // status_code is deliberately outside the cache key and gated here instead
-    // (like time_bucket): the `status`/`character` modules are re-rendered live
-    // on Path 2. This gate is what keeps their cached output fresh. If the wire
-    // protocol ever gains another per-request render input (pipestatus, jobs,
-    // shlvl are read by status.rs/jobs.rs/shlvl.rs), it must be gated here and
-    // its consuming modules skipped in populate_cache too, or it goes stale.
+    // Path 1: full hit. status_code is checked here (not in the cache key) like
+    // time_bucket so status/character re-render live on Path 2. Future
+    // per-request render inputs (pipestatus, jobs, shlvl) must be checked here
+    // and their modules skipped in populate_cache too, or they go stale.
     if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb && e.status_code == ctx.status_code) {
         return entry.rendered.clone();
     }
 
-    // Path 2: key exists but time_bucket or status_code is stale - reuse cached
-    // segments, re-render only the time/status/character modules. No bust_dir,
-    // no populate_cache.
-    // Path 3: full miss - build fresh segments in a bust_dir.
+    // Path 2: stale bucket/status - reuse cached segments, re-render only
+    // time/status/character. Path 3: full miss - build fresh segments.
     let (key, current_dir, bust_dir, segments) = match lru.pop_entry(full_key) {
         Some((key, entry)) => (key, ctx.cwd.clone(), None, Some(entry.segments)),
         None => {
@@ -573,7 +568,7 @@ mod tests {
         lru.put(key.clone(), e1);
 
         // r2 is a consistency check, not a Path-1 proof: identical output and
-        // a zero bust delta hold for both Path 1 and Path 2. The gate's failing
+        // a zero bust delta hold for both Path 1 and Path 2. The check's failing
         // direction is proven by r1's content (C-ERR after status 0 cached) and
         // r3's C-OK return on the 1->0 transition.
         let r2 = render_cached(&ctx1, Some(gd.path()), &cfg, &key, &mut lru);
@@ -583,7 +578,7 @@ mod tests {
 
         let r3 = render_cached(&ctx0, Some(gd.path()), &cfg, &key, &mut lru);
         assert!(r3.contains("C-OK") && !r3.contains("C-ERR"),
-            "status 1->0 must re-trigger a status-aware render (gate's status check must fail), got: {r3}");
+            "status 1->0 must re-trigger a status-aware render (status check must fail), got: {r3}");
         assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
             "1->0 transition must also be Path 2");
 

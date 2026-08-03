@@ -20,16 +20,14 @@ const FILE_NOTIFY_CHANGE_DIR_NAME: DWORD = 2;
 const FILE_NOTIFY_CHANGE_LAST_WRITE: DWORD = 0x10;
 const CHANGE_BUF_SIZE: u32 = 65536;
 
-// Max concurrently watched repos. The daemon's wait set is the session events
-// (MAX_SESSIONS in server.rs) plus MAX_WATCHED_REPOS watcher events; must stay
-// under MAXIMUM_WAIT_OBJECTS (64), enforced by a compile-time assert in server.rs.
+// Max concurrently watched repos: watcher events plus session events must stay
+// under MAXIMUM_WAIT_OBJECTS (64).
 pub const MAX_WATCHED_REPOS: usize = 16;
 
-// Overhead measurement for the watcher. All collection is gated by
-// STARSHIP_WATCH_STATS (STATS_ENABLED, set in main.rs): with it unset, the hot
-// path costs only a couple of relaxed atomic loads per call and never samples
-// the clock or locks the Mutex-protected accumulators. Single-threaded daemon,
-// so relaxed atomics are sufficient; only the drain thread races.
+// Overhead measurement, turned on by STARSHIP_WATCH_STATS (STATS_ENABLED, set in
+// main.rs): with it unset, the hot path costs a single relaxed atomic load and
+// never samples the clock or locks the Mutex-protected accumulators.
+// Single-threaded daemon, so relaxed atomics suffice; only the drain thread races.
 pub struct RepoStat {
     pub repo: PathBuf,
     pub completions: u64,
@@ -89,8 +87,7 @@ impl WatcherStats {
 
 pub static STATS: WatcherStats = WatcherStats::new();
 
-// Enables clock sampling and Mutex-protected accumulation. Set from main.rs
-// when STARSHIP_WATCH_STATS is present; the drain thread only spawns then.
+// Set from main.rs when STARSHIP_WATCH_STATS is present; the drain thread only spawns then.
 pub static STATS_ENABLED: AtomicBool = AtomicBool::new(false);
 
 fn stats_on() -> bool {
@@ -170,8 +167,7 @@ fn ol_ptr(ol: &mut ffi::OVERLAPPED) -> *mut c_void {
 fn is_git_internal(path: &str) -> bool {
     let trimmed = path.trim_start_matches('/');
     if let Some(rest) = trimmed.strip_prefix(".git/") {
-        // FETCH_HEAD is intentionally excluded here. We rely on refs/remotes/*
-        // changes from fetch/pull instead (FETCH_HEAD alone is not sufficient).
+        // FETCH_HEAD excluded; fetch/pull land in refs/remotes/* and bump anyway.
         rest != "index" && rest != "HEAD" && !rest.starts_with("refs/heads/") && !rest.starts_with("refs/remotes/") && rest != "refs/stash" && rest != "packed-refs"
     } else {
         trimmed == ".git"
@@ -219,9 +215,8 @@ impl Drop for WatchEntry {
     fn drop(&mut self) {
         unsafe {
             if self.dir_handle != ffi::INVALID_HANDLE_VALUE {
-                // Only skip the settle wait when CancelIoEx reports that no
-                // operation was queued (ERROR_NOT_FOUND). Any other failure is
-                // ambiguous and the op may still be in flight, so wait for it.
+                // Skip the settle wait only when CancelIoEx reports no queued
+                // op (ERROR_NOT_FOUND); otherwise the op may still be in flight.
                 if ffi::CancelIoEx(self.dir_handle, ol_ptr(&mut self.overlapped)) != 0
                     || ffi::GetLastError() != ffi::ERROR_NOT_FOUND
                 {
@@ -237,10 +232,9 @@ impl Drop for WatchEntry {
 
 pub struct WatcherState {
     pub(crate) entries: Vec<Box<WatchEntry>>,
-    // Version dispenser: consumed by entry creation and every flush bump.
-    // Starts at 1 so 0 unambiguously means "unknown repo".
+    // Version dispenser: starts at 1 so 0 unambiguously means "unknown repo".
     epoch: u64,
-    // LRU stamp dispenser: consumed by entry creation and every ensure touch.
+    // LRU stamp dispenser for ensure touches.
     touch: u64,
 }
 
@@ -279,7 +273,7 @@ impl WatcherState {
     fn ensure_inner(&mut self, repo_root: &Path) {
         // Touch an existing entry; re-arm a dead one. A revived watch must
         // force one bump to cover changes that landed while it was dead, and a
-        // failed re-arm bumps too so the entry stays fresh rather than frozen.
+        // failed re-arm bumps too so the entry stays fresh.
         for i in 0..self.entries.len() {
             if self.entries[i].repo_root == repo_root {
                 self.entries[i].last_touch = self.touch;
@@ -326,10 +320,9 @@ impl WatcherState {
         });
         self.epoch += 1;
         self.touch += 1;
-        // Arm through the box: the boxed allocation is stable for the life of
-        // the entry, so the kernel's pointer to `overlapped` stays valid.
-        // Arming a stack-local and then boxing it would leave the kernel
-        // writing completion data into the dead stack frame.
+        // Arm through the box: the boxed allocation is stable, so the kernel's
+        // pointer to `overlapped` stays valid. Arming a stack-local would leave
+        // the kernel writing into the dead frame.
         entry.armed = start_watch(&mut entry);
         if !entry.armed {
             entry.pending = true;
@@ -372,10 +365,9 @@ impl WatcherState {
                         STATS.nanos_parse.fetch_add(x.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         STATS.records.fetch_add(paths.len() as u64, Ordering::Relaxed);
                     }
-                    // Reload the ignore filter when this batch touches
-                    // .gitignore. Check BEFORE filtering: the old filter may
-                    // itself ignore .gitignore and would otherwise suppress the
-                    // reload and the bump, caching the stale rules forever.
+                    // Reload the filter when this batch touches .gitignore.
+                    // Check BEFORE filtering: the old filter may itself ignore
+                    // .gitignore and suppress the reload, caching stale rules forever.
                     let mut reload = false;
                     for (path, _) in &paths {
                         if path == ".gitignore" { reload = true; break; }
@@ -392,9 +384,8 @@ impl WatcherState {
                     let mut ignored = 0u64;
                     let mut visible = false;
                     // A reload is itself a visible change even when the new
-                    // rules filter .gitignore out of this batch (e.g. a `*`
-                    // rule): without this the new rules would be cached with
-                    // no bump and the old ones kept forever.
+                    // rules filter .gitignore out (e.g. a `*` rule); otherwise
+                    // the new rules are cached with no bump.
                     for (path, _) in &paths {
                         if is_git_internal(path) {
                             internal += 1;
@@ -420,9 +411,9 @@ impl WatcherState {
                     reload || visible
                 }
             } else {
-                // Errored completion (e.g. ERROR_NOTIFY_ENUM_DIR on kernel
-                // buffer overflow): the buffered batch is lost, so treat it as
-                // a change to avoid a stale cache with no self-heal.
+                // Errored completion (e.g. ERROR_NOTIFY_ENUM_DIR on buffer
+                // overflow): the batch is lost, treat it as a change to avoid
+                // a stale cache with no self-heal.
                 true
             };
             let st = stats_timer(on);

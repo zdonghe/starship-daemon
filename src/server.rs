@@ -15,17 +15,14 @@ const ERROR_PIPE_CONNECTED: DWORD = 535;
 const ERROR_IO_PENDING: DWORD = 997;
 const PIPE_READMODE_BYTE: DWORD = 0;
 // 9 instances: evict the least-recently-active on a 9th connect so a queued
-// client always finds a free one. Idle-reap timer rejected: a silent client
-// holds its slot only until 9-way contention, then reconnects on next prompt.
+// client always finds a free one.
 const MAX_SESSIONS: usize = 9;
 const MAX_REQS_PER_WAKE: u32 = 8;
 // Max frame = 5 + MAX_TOTAL_LEN = MAX_FRAME_LEN (lib.rs), the one source of
 // truth for buf and the pipe in/out buffers; total_len is capped at the header
-// stage so want never outgrows buf. Body caps (32768+256+4096) plus fixed
-// fields ~37 KiB; the headroom is forward-compat slack.
-
-// Wait set is the only thing sharing MAXIMUM_WAIT_OBJECTS (64); guard against
-// silent WAIT_FAILED busy-spin if either cap is raised.
+// stage so want never outgrows buf.
+// Wait set shares MAXIMUM_WAIT_OBJECTS (64); guard against silent WAIT_FAILED
+// busy-spin if either cap is raised.
 const _: () = assert!(MAX_SESSIONS + MAX_WATCHED_REPOS <= 64);
 
 #[derive(Clone, Copy)]
@@ -34,9 +31,7 @@ enum ReadStage {
     Body,
 }
 
-// The one outstanding overlapped op. Never Idle at rest: Connect (parked in
-// ConnectNamedPipe), ReadPending/WritePending (kernel owns the OVERLAPPED), or
-// ReadBuffered (sync-completed read deferred across a firehose self-wake).
+// The one outstanding overlapped op; never Idle at rest.
 enum SessionOp {
     Connect,
     ReadPending,
@@ -53,9 +48,8 @@ struct Session {
     connected: bool,
     op: SessionOp,
     write_buf: Vec<u8>,
-    // Frame receive state: got = received prefix = buf write offset; reads are
-    // only ever issued for want - got, so got never overshoots want and
-    // buf[0..got] is always the received prefix.
+    // Frame receive state: got = received prefix; reads are only issued for
+    // want - got, so got never overshoots want.
     stage: ReadStage,
     want: usize,
     got: usize,
@@ -79,8 +73,7 @@ impl Session {
         }
     }
 
-    // Re-arm for the next header. Sets ONLY stage/want/got - never op (see
-    // disconnect_session's cancel-wait).
+    // Re-arm for the next header. Sets ONLY stage/want/got - never op.
     fn reset_read_state(&mut self) {
         self.stage = ReadStage::Header;
         self.want = HEADER_LEN;
@@ -118,8 +111,8 @@ fn issue_read_at(s: &mut Session, offset: usize, count: usize) -> ReadIssue {
     }
 }
 
-// Begin a fresh op. Order is load-bearing: zero the OVERLAPPED before binding
-// the event, then ResetEvent before issuing, so a stale completion can't be
+// Begin a fresh op. Order is load-bearing: zero the OVERLAPPED, bind the
+// event, then ResetEvent before issuing, so a stale completion can't be
 // attributed to this op.
 fn begin_op(s: &mut Session) -> *mut c_void {
     unsafe {
@@ -131,7 +124,7 @@ fn begin_op(s: &mut Session) -> *mut c_void {
 }
 
 // Poll the op: Some(n) done (n bytes; 0 = broken), None = in flight. `expected`
-// gates a short write (bytes != len) into Some(0) so a half-written frame
+// turns a short write (bytes != len) into Some(0) so a half-written frame
 // disconnects instead of resuming.
 fn complete_op(s: &mut Session, expected: Option<usize>) -> Option<u32> {
     unsafe {
@@ -181,8 +174,8 @@ fn rearm_connect(s: &mut Session) {
 fn disconnect_session(s: &mut Session) {
     unsafe { ffi::DisconnectNamedPipe(s.pipe); }
     if matches!(s.op, SessionOp::ReadPending | SessionOp::WritePending) {
-        // DisconnectNamedPipe cancels the pending op; wait out the cancel
-        // before rearming so a stale completion can't signal after ResetEvent.
+        // Cancel the pending op and wait it out before rearming so a stale
+        // completion can't signal after ResetEvent.
         unsafe {
             let mut bytes: DWORD = 0;
             let _ = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 1);
@@ -196,8 +189,7 @@ fn disconnect_session(s: &mut Session) {
 }
 
 // Manual-reset event is still latched (WFMO never clears it) but the op is
-// still pending: clear the latch or the daemon spins; the real completion
-// re-signals. Same reasoning as begin_op.
+// still pending: clear the latch or the daemon spins. Same reasoning as begin_op.
 fn park(s: &mut Session) {
     unsafe { ffi::ResetEvent(s.event); }
 }
@@ -206,8 +198,8 @@ fn park(s: &mut Session) {
 fn consume_completed_op(s: &mut Session) -> bool {
     match s.op {
         SessionOp::Connect => {
-            // Signal-based: no GetOverlappedResult (a connect reports 0 bytes,
-            // ERROR_PIPE_CONNECTED reads as pending). First read comes next.
+            // Signal-based: no GetOverlappedResult (a connect reports 0 bytes);
+            // first read comes next.
             s.connected = true;
             s.op = SessionOp::Idle;
             true
@@ -341,10 +333,9 @@ fn create_sessions(pipe_name: &[u16]) -> Vec<Session> {
 }
 
 // Service every signaled session (not WFMO's lowest-index result) so a
-// self-woken firehose session can't re-select itself and starve the rest.
-// Then rotate: the eviction check runs on any session wake, but eviction can
-// only fire when the connected count hits MAX_SESSIONS, reachable only on a
-// wake that reaped a connect, so a queued client always finds a free instance.
+// self-woken firehose session can't starve the rest. Eviction only fires on a
+// connect-reap (connected count hits MAX_SESSIONS), so a queued client always
+// finds a free instance.
 fn service_signaled_sessions(sessions: &mut [Session], state: &mut DaemonState) {
     for idx in 0..sessions.len() {
         let ev = sessions[idx].event;

@@ -31,8 +31,7 @@ impl DaemonState {
         Ok(DaemonState { config_path, cached_config, last_cfg_mtime, lru, watcher: WatcherState::new() })
     }
 
-    // Pay the first prompt-render cost off the client's path. Called by the
-    // server after pipes are armed so a connecting client never finds no pipe.
+    // Pre-render once pipes are armed so no client pays the cold-start cost.
     pub fn warm_up(&mut self) {
         let warm_ctx = RenderContext {
             cwd: PathBuf::from("."),
@@ -44,8 +43,7 @@ impl DaemonState {
         let _ = cache::render_cached(&warm_ctx, None, &self.cached_config, &warm_key, &mut self.lru);
     }
 
-    // Reload core shared by both config-change paths. set_var stays with the
-    // caller: bundling it here would overwrite STARSHIP_CONFIG on mtime edits.
+    // set_var stays with the caller so mtime edits don't repoint STARSHIP_CONFIG.
     pub fn reload_config(&mut self) {
         self.cached_config = cache::read_config(&self.config_path);
         self.lru.clear();
@@ -69,9 +67,8 @@ impl DaemonState {
         Ok(output)
     }
 
-    // Reload if changed; returns the mtime for the cache key. Explicit path
-    // repoints STARSHIP_CONFIG (reload refreshes mtime, so it's the return
-    // value); otherwise fall through to the mtime check.
+    // Reload if changed, return the mtime for the cache key. An explicit path
+    // repoints STARSHIP_CONFIG; otherwise fall through to the mtime check.
     fn sync_config(&mut self, requested: Option<&str>) -> u64 {
         if let Some(req) = requested {
             let p = Path::new(req);

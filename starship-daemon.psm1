@@ -33,15 +33,11 @@ function Get-StarshipPrompt
             $script:DaemonPipe = $pipe
         }
 
-        # pwsh 7+ only: process cwd tracks Set-Location in Core; 5.1 would go stale.
         $cwd = $PWD.ProviderPath
         $cwdBytes = [Text.Encoding]::UTF8.GetBytes($cwd)
 
         if ($cwdBytes.Length -gt 32768)
         {
-            # The daemon caps cwd at 32768 bytes (MAX_CWD_LEN). A longer cwd
-            # would be rejected and could wedge a frame over the 64 KiB pipe
-            # buffer; fall back to the plain prompt instead.
             return $null
         }
 
@@ -63,7 +59,6 @@ function Get-StarshipPrompt
             if ($env:STARSHIP_DAEMON_CACHE -eq "0")
             { $disableCache = 1 }
 
-            # Single little-endian frame, matching the daemon's LE wire layout.
             $bodyLen = 4 + $cwdBytes.Length + 4 + 2 + $keymapBytes.Length + 4 + 2 + $configBytes.Length + 1
             $buf = [byte[]]::new(5 + $bodyLen)
             $buf[0] = 1
@@ -147,42 +142,66 @@ function Disable-StarshipDaemon
 
 $MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = { Disable-StarshipDaemon }
 
+$env:VIRTUAL_ENV_DISABLE_PROMPT = 1
+$env:STARSHIP_SHELL = if ($PSVersionTable.PSVersion.Major -gt 5) { "pwsh" } else { "powershell" }
+
 Start-StarshipDaemon
 
-# Continuation prompt matching starship default
 Set-PSReadLineOption -ContinuationPrompt "· "
 
 function global:prompt
 {
-    $lastCmdOk = if ($null -ne $global:PromptLastCmdOk)
-    { $global:PromptLastCmdOk 
-    } else
-    { $? 
-    }
-    $origLastExitCode = if ($null -ne $global:PromptLastExitCode)
-    { $global:PromptLastExitCode 
-    } else
-    { $global:LASTEXITCODE 
-    }
-    $loc = $executionContext.SessionState.Path.CurrentLocation
+    $origDollarQuestion = $global:?
+    $origLastExitCode = $global:LASTEXITCODE
 
     try
     {
+        if (Test-Path function:Invoke-Starship-PreCommand)
+        {
+            Invoke-Starship-PreCommand
+        }
+    } catch { }
+
+    $loc = $executionContext.SessionState.Path.CurrentLocation
+
+    $exitCode = 0
+    if ($lastCmd = Get-History -Count 1)
+    {
+        if (-not $origDollarQuestion)
+        {
+            $lastCmdletError = try { $global:error[0] | Where-Object { $_ -ne $null } | Select-Object -ExpandProperty InvocationInfo } catch { $null }
+            $exitCode = if ($null -ne $lastCmdletError -and $lastCmd.CommandLine -eq $lastCmdletError.Line) { 1 } else { $origLastExitCode }
+        }
+    }
+
+    $result = $null
+    try
+    {
         $keymap = if ([Microsoft.PowerShell.PSConsoleReadLine]::InViCommandMode()) { "vi" } else { "emacs" }
-        $exitCode = if ($lastCmdOk)
-        { 0 
-        } elseif ($origLastExitCode -ne 0)
-        { $origLastExitCode 
-        } else
-        { 1 
-        }
         $result = Get-StarshipPrompt -ExitCode $exitCode -Keymap $keymap -Width $Host.UI.RawUI.WindowSize.Width
-        if ($result)
-        { return $result 
-        }
     } catch
     {
     }
 
-    "PS $($loc.ProviderPath)> "
+    if (-not $result)
+    {
+        $result = "PS $($loc.ProviderPath)> "
+    }
+
+    Set-PSReadLineOption -ExtraPromptLineCount ($result.Split("`n").Length - 1)
+
+    $result
+
+    $global:LASTEXITCODE = $origLastExitCode
+
+    if ($global:? -ne $origDollarQuestion)
+    {
+        if ($origDollarQuestion)
+        {
+            1+1
+        } else
+        {
+            Write-Error '' -ErrorAction 'Ignore'
+        }
+    }
 }

@@ -13,17 +13,19 @@ Add this to your `$PROFILE`:
 ```powershell
 $env:STARSHIP_DAEMON_PATH = "C:\path\to\starship-daemon.exe"
 Import-Module "C:\path\to\starship-daemon.psm1" -DisableNameChecking
-
-# Wrapper for error-code support
-$oldPrompt = $Function:prompt
-function prompt {
-    $global:PromptLastCmdOk = $?
-    $global:PromptLastExitCode = $global:LASTEXITCODE
-    & $oldPrompt
-}
 ```
 
-The module auto-starts the daemon and replaces the `prompt` function.
+The module auto-starts the daemon and replaces the `prompt` function. It also preserves `$?` and `$LASTEXITCODE` across prompt rendering, so no wrapper is needed.
+
+To run code before every prompt (like official starship's `Invoke-Starship-PreCommand` hook), define a global function with that name:
+
+```powershell
+function Invoke-Starship-PreCommand {
+    # Reset cursor shape and write terminal OSC sequences
+    Write-Host -NoNewLine "`e[5 q"
+    $host.ui.Write("$esc]9;12$bel")
+}
+```
 
 ## Config
 

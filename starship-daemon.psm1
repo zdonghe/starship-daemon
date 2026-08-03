@@ -1,6 +1,9 @@
 $script:DaemonPath = $env:STARSHIP_DAEMON_PATH
 $script:LastStarshipConfig = $null
 $script:DaemonPipe = $null
+$script:KeymapViBytes = [Text.Encoding]::UTF8.GetBytes("vi")
+$script:KeymapEmacsBytes = [Text.Encoding]::UTF8.GetBytes("emacs")
+$script:EmptyBytes = [Text.Encoding]::UTF8.GetBytes([string]$null)
 
 function Start-StarshipDaemon
 {
@@ -25,7 +28,9 @@ function Get-StarshipPrompt
             {
                 $pipeName = if ($env:STARSHIP_DAEMON_PIPE) { $env:STARSHIP_DAEMON_PIPE } else { "starship-daemon" }
                 $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
-                $p.Connect(10); $p
+                $p.Connect(10)
+                $p.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
+                $p
             } catch
             {
                 return $null
@@ -45,7 +50,7 @@ function Get-StarshipPrompt
         $result = $null
         try
         {
-            $keymapBytes = [Text.Encoding]::UTF8.GetBytes($Keymap)
+            $keymapBytes = if ($Keymap -eq "vi") { $script:KeymapViBytes } else { $script:KeymapEmacsBytes }
             $currentCfg = $env:STARSHIP_CONFIG
             $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
             if ($cfgChanged)
@@ -53,7 +58,7 @@ function Get-StarshipPrompt
                 $configBytes = [Text.Encoding]::UTF8.GetBytes($currentCfg)
             } else
             {
-                $configBytes = [byte[]]::new(0)
+                $configBytes = $script:EmptyBytes
             }
             $disableCache = 0
             if ($env:STARSHIP_DAEMON_CACHE -eq "0")
@@ -76,34 +81,20 @@ function Get-StarshipPrompt
             $pipe.Write($buf, 0, $buf.Length)
             $pipe.Flush()
 
-            $lenBuf = [byte[]]::new(4)
-            if ($pipe.Read($lenBuf, 0, 4) -ne 4)
+            $respBuf = [byte[]]::new(65536)
+            $read = $pipe.Read($respBuf, 0, $respBuf.Length)
+            if ($read -lt 4)
             {
                 $failed = $true
             } else
             {
-                $respLen = [BitConverter]::ToUInt32($lenBuf, 0)
-                if ($respLen -le 0 -or $respLen -gt 65536)
+                $respLen = [BitConverter]::ToUInt32($respBuf, 0)
+                if ($respLen -le 0 -or $respLen -gt 65531 -or $read -lt 4 + $respLen)
                 {
                     $failed = $true
                 } else
                 {
-                    $respBuf = [byte[]]::new($respLen)
-                    $read = 0
-                    while ($read -lt $respLen)
-                    {
-                        $n = $pipe.Read($respBuf, $read, $respLen - $read)
-                        if ($n -le 0)
-                        {
-                            $failed = $true
-                            break
-                        }
-                        $read += $n
-                    }
-                    if (-not $failed)
-                    {
-                        $result = [Text.Encoding]::UTF8.GetString($respBuf, 0, $read)
-                    }
+                    $result = [Text.Encoding]::UTF8.GetString($respBuf, 4, $respLen)
                 }
             }
         } catch
@@ -165,12 +156,12 @@ function global:prompt
     $loc = $executionContext.SessionState.Path.CurrentLocation
 
     $exitCode = 0
-    if ($lastCmd = Get-History -Count 1)
+    if (-not $origDollarQuestion)
     {
-        if (-not $origDollarQuestion)
+        if ($lastCmd = Get-History -Count 1)
         {
-            $lastCmdletError = try { $global:error[0] | Where-Object { $_ -ne $null } | Select-Object -ExpandProperty InvocationInfo } catch { $null }
-            $exitCode = if ($null -ne $lastCmdletError -and $lastCmd.CommandLine -eq $lastCmdletError.Line) { 1 } else { $origLastExitCode }
+            $lastCmdletError = try { $global:error[0].InvocationInfo } catch { $null }
+            if ($null -ne $lastCmdletError -and $lastCmd.CommandLine -eq $lastCmdletError.Line) { $exitCode = 1 } else { $exitCode = $origLastExitCode }
         }
     }
 
@@ -187,8 +178,6 @@ function global:prompt
     {
         $result = "PS $($loc.ProviderPath)> "
     }
-
-    Set-PSReadLineOption -ExtraPromptLineCount ($result.Split("`n").Length - 1)
 
     $result
 

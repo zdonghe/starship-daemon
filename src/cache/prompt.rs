@@ -206,16 +206,10 @@ pub fn render_cached(
     let tb = crate::cache::current_minute();
     let resolved_gd = git_dir.map(Path::to_path_buf);
 
-    // Path 1: full hit. status_code is checked here (not in the cache key) like
-    // time_bucket so status/character re-render live on Path 2. Future
-    // per-request render inputs (pipestatus, jobs, shlvl) must be checked here
-    // and their modules skipped in populate_cache too, or they go stale.
     if let Some(entry) = lru.get(&full_key).filter(|e| e.time_bucket == tb && e.status_code == ctx.status_code) {
         return entry.rendered.clone();
     }
 
-    // Path 2: stale bucket/status - reuse cached segments, re-render only
-    // time/status/character. Path 3: full miss - build fresh segments.
     let (key, current_dir, bust_dir, segments) = match lru.pop_entry(full_key) {
         Some((key, entry)) => (key, ctx.cwd.clone(), None, Some(entry.segments)),
         None => {
@@ -252,8 +246,6 @@ pub fn render_cached(
     rendered
 }
 
-// Stock starship exposes no segment API, so the whole rendered prompt is
-// cached instead.
 #[cfg(not(fork_starship))]
 pub fn render_cached(
     ctx: &RenderContext,
@@ -393,13 +385,11 @@ mod tests {
         let got = render_cached(&ctx, None, &cfg, &key, &mut lru);
         assert_eq!(got, expected);
 
-        // Second call: should be a full hit (same time_bucket + format_str)
         let got2 = render_cached(&ctx, None, &cfg, &key, &mut lru);
         assert_eq!(got2, expected, "second call (full hit) should match");
 
-        // Verify time-only re-render on stale time_bucket
         let (_, mut evicted) = lru.pop_entry(&key).unwrap();
-        evicted.time_bucket = 0; // simulate minute tick
+        evicted.time_bucket = 0;
         lru.put(key.clone(), evicted);
         let got3 = render_cached(&ctx, None, &cfg, &key, &mut lru);
         assert_eq!(got3, expected, "time-only re-render should match full render");
@@ -427,7 +417,6 @@ mod tests {
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _full = render_cached(&ctx, None, &cfg, &key, &mut lru);
 
-        // Stale time_bucket to force time-only path
         let (_, mut entry) = lru.pop_entry(&key).unwrap();
         entry.time_bucket = 0;
         lru.put(key.clone(), entry);
@@ -435,7 +424,6 @@ mod tests {
         let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
         assert!(!result.is_empty(), "result must not be empty");
 
-        // Key still exists and has current time_bucket
         let cached = lru.get(&key).unwrap();
         let tb = crate::cache::current_minute();
         assert_eq!(cached.time_bucket, tb, "time_bucket must be updated");
@@ -466,7 +454,6 @@ mod tests {
         let result = render_cached(&ctx, None, &cfg, &key, &mut lru);
         assert!(result.contains(':'), "output must contain time (HH:MM)");
 
-        // Snapshot segments after full render (Path 3)
         let (_, before) = lru.pop_entry(&key).unwrap();
         let segment_keys: Vec<String> = before.segments.keys().cloned().collect();
         assert!(segment_keys.contains(&"directory".to_string()));
@@ -475,7 +462,6 @@ mod tests {
         assert!(!segment_keys.contains(&"time".to_string()));
         lru.put(key.clone(), before);
 
-        // Three consecutive stale-bucket re-renders must preserve all segments
         for i in 0..3 {
             let (_, mut entry) = lru.pop_entry(&key).unwrap();
             entry.time_bucket = 0;
@@ -499,14 +485,10 @@ mod tests {
     #[cfg(fork_starship)]
     #[test]
     fn render_cached_status_code_isolation() {
-        // Clear any repo-cache entry left by a prior test (or a failed run of
-        // this one) before we populate the fake-git_dir entry below.
+
         clear_repo_cache();
         let cwd = tempfile::TempDir::new().unwrap();
-        // Plain tempdir as a fake git_dir: render_cached never falls back to
-        // find_git_dir, and a bust dir (which bumps BUST_COUNTER) is made only
-        // on a full Path-3 miss, so the counter delta is a direct signal for
-        // "segments were reused, not rebuilt".
+
         let gd = tempfile::TempDir::new().unwrap();
         let cfg = toml::toml! {
             format = "$character$status$directory"
@@ -522,9 +504,7 @@ mod tests {
             [directory]
             disabled = false
         };
-        // keymap "" is deliberate: "vi" maps to ShellEditMode::Normal and
-        // character.rs uses vimcmd_symbol, bypassing success/error_symbol and
-        // voiding the symbols assertions.
+
         let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
 
@@ -535,8 +515,6 @@ mod tests {
             cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 1, keymap: "".to_string(),
         };
 
-        // Reset the shared bust counter so this test is hermetic regardless of
-        // prior busts; the assertions below are deltas against `base`.
         BUST_COUNTER.store(0, Ordering::Relaxed);
         let base = BUST_COUNTER.load(Ordering::Relaxed);
 
@@ -567,10 +545,6 @@ mod tests {
         assert!(!e1.segments.contains_key("status"));
         lru.put(key.clone(), e1);
 
-        // r2 is a consistency check, not a Path-1 proof: identical output and
-        // a zero bust delta hold for both Path 1 and Path 2. The check's failing
-        // direction is proven by r1's content (C-ERR after status 0 cached) and
-        // r3's C-OK return on the 1->0 transition.
         let r2 = render_cached(&ctx1, Some(gd.path()), &cfg, &key, &mut lru);
         assert_eq!(r1, r2, "same status must hit Path 1 verbatim");
         assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
@@ -615,9 +589,6 @@ mod stock_cache_tests {
             cwd: cwd.to_path_buf(), terminal_width: 120, status_code: status, keymap: "".to_string(),
         }
     }
-
-    // keymap "" is deliberate: "vi" maps to ShellEditMode::Normal and
-    // character.rs uses vimcmd_symbol, bypassing success/error_symbol.
 
     #[test]
     fn hit_serves_cached_rendered_without_rerender() {

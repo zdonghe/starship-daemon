@@ -68,7 +68,7 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
 pub const PROTO_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 5;
 pub const MAX_FRAME_LEN: usize = 65536;
-pub const MAX_TOTAL_LEN: usize = MAX_FRAME_LEN - HEADER_LEN; // 65531
+pub const MAX_TOTAL_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 pub const MAX_CWD_LEN: usize = 32768;
 pub const MAX_KEYMAP_LEN: usize = 256;
 pub const MAX_CONFIG_LEN: usize = 4096;
@@ -95,15 +95,13 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
     let body = &data[HEADER_LEN..HEADER_LEN + total_len];
     let mut off = 0usize;
 
-    // Every read is bounds checked. A cwd that eats the fixed tail, or an
-    // exact-fill keymap or config, must return None - never panic.
-    let cwd_len = u32::from_le_bytes(read_slice(body, &mut off, 4)?.try_into().unwrap()) as usize;
+    let cwd_len = read_u32(body, &mut off)? as usize;
     if cwd_len > MAX_CWD_LEN { return None; }
     let cwd = PathBuf::from(String::from_utf8_lossy(read_slice(body, &mut off, cwd_len)?).into_owned());
 
-    let status_code = i32::from_le_bytes(read_slice(body, &mut off, 4)?.try_into().unwrap());
+    let status_code = read_i32(body, &mut off)?;
 
-    let keymap_len = u16::from_le_bytes(read_slice(body, &mut off, 2)?.try_into().unwrap()) as usize;
+    let keymap_len = read_u16(body, &mut off)? as usize;
     let keymap = if keymap_len == 0 {
         None
     } else {
@@ -111,9 +109,9 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
         Some(String::from_utf8_lossy(read_slice(body, &mut off, keymap_len)?).into_owned())
     };
 
-    let terminal_width = u32::from_le_bytes(read_slice(body, &mut off, 4)?.try_into().unwrap()) as usize;
+    let terminal_width = read_u32(body, &mut off)? as usize;
 
-    let config_len = u16::from_le_bytes(read_slice(body, &mut off, 2)?.try_into().unwrap()) as usize;
+    let config_len = read_u16(body, &mut off)? as usize;
     let starship_config = if config_len == 0 {
         None
     } else {
@@ -136,12 +134,22 @@ fn read_slice<'a>(body: &'a [u8], off: &mut usize, n: usize) -> Option<&'a [u8]>
     Some(s)
 }
 
+fn read_u32<'a>(body: &'a [u8], off: &mut usize) -> Option<u32> {
+    Some(u32::from_le_bytes(read_slice(body, off, 4)?.try_into().unwrap()))
+}
+
+fn read_i32<'a>(body: &'a [u8], off: &mut usize) -> Option<i32> {
+    Some(i32::from_le_bytes(read_slice(body, off, 4)?.try_into().unwrap()))
+}
+
+fn read_u16<'a>(body: &'a [u8], off: &mut usize) -> Option<u16> {
+    Some(u16::from_le_bytes(read_slice(body, off, 2)?.try_into().unwrap()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The fixed body layout with no variable-length data: cwd_len(4) + cwd(0)
-    // + status(4) + keymap_len(2) + width(4) + config_len(2) + disable(1) = 17.
     const FIXED_BODY_LEN: usize = 17;
 
     fn encode_body(cwd: &str, status: i32, keymap: Option<&str>, width: u32, config: Option<&str>, disable: bool) -> Vec<u8> {
@@ -191,7 +199,7 @@ mod tests {
 
     #[test]
     fn parse_request_minimal() {
-        // All variable-length fields empty: body = 17 bytes, frame = 22.
+
         let data = encode_request_v1("", 0, None, 0, None, false);
         assert_eq!(data.len(), HEADER_LEN + FIXED_BODY_LEN);
         let r = parse_request(&data);
@@ -203,7 +211,7 @@ mod tests {
 
     #[test]
     fn parse_request_empty_keymap_is_none() {
-        // keymap_len = 0 -> None -> daemon default ("vi" in daemon.rs).
+
         let data = encode_request_v1(".", 0, None, 0, None, false);
         let req = parse_request(&data).unwrap();
         assert_eq!(req.props.keymap, None);
@@ -232,13 +240,11 @@ mod tests {
 
     #[test]
     fn parse_request_total_len_over_cap() {
-        // Declared total_len exceeds MAX_TOTAL_LEN (65531): rejected even though
-        // no body is present.
+
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(MAX_TOTAL_LEN as u32 + 1).to_le_bytes());
         assert!(parse_request(&data).is_none());
 
-        // At the cap with no body it is still truncated (data.len() < 5 + total_len).
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(MAX_TOTAL_LEN as u32).to_le_bytes());
         assert!(parse_request(&data).is_none());
@@ -246,11 +252,10 @@ mod tests {
 
     #[test]
     fn parse_request_trailing_bytes_tolerated() {
-        // Forward-compat: fields appended after the disable byte are outside
-        // the v1 layout and must be ignored, not rejected.
+
         let mut data = encode_request_v1(".", 0, Some("vi"), 120, None, true);
-        data.push(0); // one extra trailing byte
-        data.push(0xde); // more trailing bytes
+        data.push(0);
+        data.push(0xde);
         let req = parse_request(&data);
         assert!(req.is_some(), "trailing body bytes must be tolerated");
         let req = req.unwrap();
@@ -259,7 +264,7 @@ mod tests {
 
     #[test]
     fn parse_request_disable_nonzero_is_true() {
-        // disable_cache treats any non-zero byte as true (lenient decode).
+
         let mut data = encode_request_v1(".", 0, None, 0, None, false);
         let last = data.len() - 1;
         data[last] = 0xff;
@@ -269,7 +274,7 @@ mod tests {
 
     #[test]
     fn parse_request_cwd_len_overrun() {
-        // cwd_len claims 100 bytes but the body only carries 17.
+
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
         data.extend_from_slice(&100u32.to_le_bytes());
@@ -283,7 +288,7 @@ mod tests {
 
     #[test]
     fn parse_request_cwd_len_too_big() {
-        // cwd_len exceeds MAX_CWD_LEN even though the frame is well-formed.
+
         let body_len = FIXED_BODY_LEN + MAX_CWD_LEN + 1;
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(body_len as u32).to_le_bytes());
@@ -294,12 +299,12 @@ mod tests {
 
     #[test]
     fn parse_request_keymap_overrun() {
-        // keymap_len claims 100 bytes but the body ends after the disable byte.
+
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes()); // cwd_len = 0
+        data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
-        data.extend_from_slice(&100u16.to_le_bytes()); // keymap_len > remaining
+        data.extend_from_slice(&100u16.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0u16.to_le_bytes());
         data.push(0);
@@ -314,16 +319,14 @@ mod tests {
         data.extend_from_slice(&0i32.to_le_bytes());
         data.extend_from_slice(&0u16.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&100u16.to_le_bytes()); // config_len > remaining
+        data.extend_from_slice(&100u16.to_le_bytes());
         data.push(0);
         assert!(parse_request(&data).is_none());
     }
 
     #[test]
     fn parse_request_cwd_eats_tail_never_panics() {
-        // In-range cwd lengths that consume the fixed tail bytes must return
-        // None, never panic. This sweeps the panic band over a 17-byte body
-        // (cwd_len >= 10 used to slice body[17..21] and abort).
+
         for cwd_len in 1..=13usize {
             let mut data = vec![PROTO_VERSION];
             data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
@@ -332,32 +335,28 @@ mod tests {
             assert!(parse_request(&data).is_none(), "cwd_len={cwd_len} must be rejected");
         }
 
-        // keymap_len = 3 fills the body exactly after width: the config_len
-        // read used to slice body[17..19] on a 17-byte body and panic.
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes()); // cwd_len = 0
+        data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
-        data.extend_from_slice(&3u16.to_le_bytes()); // keymap_len = 3
+        data.extend_from_slice(&3u16.to_le_bytes());
         data.resize(HEADER_LEN + FIXED_BODY_LEN, 0);
         assert!(parse_request(&data).is_none());
 
-        // config_len = 3 with a 19-byte body: config fills the body exactly
-        // and the unguarded disable read used to panic at body[19].
         let mut data = vec![PROTO_VERSION];
-        data.extend_from_slice(&19u32.to_le_bytes()); // total_len = 19
-        data.extend_from_slice(&0u32.to_le_bytes()); // cwd_len = 0
-        data.extend_from_slice(&0i32.to_le_bytes());
-        data.extend_from_slice(&0u16.to_le_bytes()); // keymap_len = 0
+        data.extend_from_slice(&19u32.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&3u16.to_le_bytes()); // config_len = 3
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&3u16.to_le_bytes());
         data.resize(HEADER_LEN + 19, 0);
         assert!(parse_request(&data).is_none());
     }
 
     #[test]
     fn parse_request_exact_boundary_caps() {
-        // Max-length fields must be accepted; one over must be rejected.
+
         let ok = encode_request_v1(&"a".repeat(MAX_CWD_LEN), 0, None, 0, None, false);
         assert!(parse_request(&ok).is_some(), "cwd_len == MAX_CWD_LEN must fit");
         let over = encode_request_v1(&"a".repeat(MAX_CWD_LEN + 1), 0, None, 0, None, false);
@@ -377,23 +376,23 @@ mod tests {
     #[test]
     fn parse_request_non_utf8_cwd_is_lossy() {
         let mut data = encode_request_v1(".", 0, None, 0, None, false);
-        // cwd_len = 1, so the cwd byte is body[4]; corrupt it.
+
         data[HEADER_LEN + 4] = 0xff;
         let req = parse_request(&data);
         assert!(req.is_some());
-        // from_utf8_lossy replaces invalid sequences with U+FFFD
+
         assert!(!req.unwrap().cwd.as_os_str().is_empty());
     }
 
     #[test]
     fn parse_request_non_utf8_keymap_and_config_are_lossy() {
-        // keymap/config decode with the same lossy rule as the cwd.
+
         let keymap_b = [0xffu8, 0xfe];
         let config_b = [0x80u8, 0x81];
         let body_len = FIXED_BODY_LEN + keymap_b.len() + config_b.len();
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(body_len as u32).to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes()); // cwd_len = 0
+        data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
         data.extend_from_slice(&(keymap_b.len() as u16).to_le_bytes());
         data.extend_from_slice(&keymap_b);

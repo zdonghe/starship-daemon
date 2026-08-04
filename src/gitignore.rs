@@ -12,8 +12,6 @@ pub struct GitignoreFilter {
     pub rules: Vec<Rule>,
 }
 
-// Parse one .gitignore line into a Rule. Returns None for empty lines,
-// comments, and patterns that reduce to nothing (a bare "/" or "!/").
 pub fn parse_rule_line(line: &str) -> Option<Rule> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') { return None; }
@@ -111,8 +109,6 @@ fn match_single_component(part: &str, path_comps: &[&str], anchored: bool) -> bo
     }
 }
 
-// No "**" means anchored (a "/" in a pattern implies anchoring); compare the
-// leading prefix.
 fn match_leading_components(parts: &[String], path_comps: &[&str]) -> bool {
     parts.iter().zip(path_comps.iter()).all(|(p, c)| component_match(p, c))
 }
@@ -124,8 +120,7 @@ fn match_with_doublestar(parts: &[String], path_comps: &[&str], anchored: bool) 
         }
         if parts[pi] == "**" {
             let remaining = parts.len() - pi - 1;
-            // A trailing "**" after other parts must consume at least one
-            // component, so "a/**" does not also match "a" itself.
+
             let min_consume = if remaining == 0 && parts.len() > 1 { 1 } else { 0 };
             let max = comps.len().saturating_sub(remaining);
             for end in (ci + min_consume)..=max {

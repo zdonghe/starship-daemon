@@ -31,7 +31,6 @@ impl DaemonState {
         Ok(DaemonState { config_path, cached_config, last_cfg_mtime, lru, watcher: WatcherState::new() })
     }
 
-    // Pre-render once pipes are armed so no client pays the cold-start cost.
     pub fn warm_up(&mut self) {
         let warm_ctx = RenderContext {
             cwd: PathBuf::from("."),
@@ -43,7 +42,6 @@ impl DaemonState {
         let _ = cache::render_cached(&warm_ctx, None, &self.cached_config, &warm_key, &mut self.lru);
     }
 
-    // set_var stays with the caller so mtime edits don't repoint STARSHIP_CONFIG.
     pub fn reload_config(&mut self) {
         self.cached_config = cache::read_config(&self.config_path);
         self.lru.clear();
@@ -56,7 +54,7 @@ impl DaemonState {
             Some(r) => r,
             None => return Err(DaemonError::BadFrame),
         };
-        // Lenient empty cwd: feed "." so rendering never sees a zero-length path.
+
         let cwd = if cwd.as_os_str().is_empty() { PathBuf::from(".") } else { cwd };
         let git_dir = crate::find_git_dir(&cwd);
         let status_code = props.status_code;
@@ -67,8 +65,6 @@ impl DaemonState {
         Ok(output)
     }
 
-    // Reload if changed, return the mtime for the cache key. An explicit path
-    // repoints STARSHIP_CONFIG; otherwise fall through to the mtime check.
     fn sync_config(&mut self, requested: Option<&str>) -> u64 {
         if let Some(req) = requested {
             let p = Path::new(req);
@@ -111,7 +107,6 @@ mod tests {
 
     use super::*;
 
-    // set_var is process-global; serialize the env-mutating test.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvGuard(Option<String>);
@@ -254,9 +249,6 @@ mod tests {
         assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
     }
 
-    // A checked-out branch rewrites .git/HEAD, which the watcher does not
-    // treat as internal (watch.rs is_internal test table), so it must bump
-    // the repo version. Waits for the async ReadDirectoryChangesW event.
     #[cfg(fork_starship)]
     fn wait_for_bump(w: &mut WatcherState, repo: &std::path::Path, before: u64) {
         let deadline = Instant::now() + Duration::from_secs(5);

@@ -1,5 +1,7 @@
 use std::ffi::c_void;
 use std::mem;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use starship_daemon::daemon::DaemonState;
@@ -14,15 +16,8 @@ const PIPE_WAIT: DWORD = 0;
 const ERROR_PIPE_CONNECTED: DWORD = 535;
 const ERROR_IO_PENDING: DWORD = 997;
 const PIPE_READMODE_BYTE: DWORD = 0;
-// 9 instances: evict the least-recently-active on a 9th connect so a queued
-// client always finds a free one.
 const MAX_SESSIONS: usize = 9;
 const MAX_REQS_PER_WAKE: u32 = 8;
-// Max frame = 5 + MAX_TOTAL_LEN = MAX_FRAME_LEN (lib.rs), the one source of
-// truth for buf and the pipe in/out buffers; total_len is capped at the header
-// stage so want never outgrows buf.
-// Wait set shares MAXIMUM_WAIT_OBJECTS (64); guard against silent WAIT_FAILED
-// busy-spin if either cap is raised.
 const _: () = assert!(MAX_SESSIONS + MAX_WATCHED_REPOS <= 64);
 
 #[derive(Clone, Copy)]
@@ -31,7 +26,6 @@ enum ReadStage {
     Body,
 }
 
-// The one outstanding overlapped op; never Idle at rest.
 enum SessionOp {
     Connect,
     ReadPending,
@@ -48,8 +42,6 @@ struct Session {
     connected: bool,
     op: SessionOp,
     write_buf: Vec<u8>,
-    // Frame receive state: got = received prefix; reads are only issued for
-    // want - got, so got never overshoots want.
     stage: ReadStage,
     want: usize,
     got: usize,
@@ -73,7 +65,6 @@ impl Session {
         }
     }
 
-    // Re-arm for the next header. Sets ONLY stage/want/got - never op.
     fn reset_read_state(&mut self) {
         self.stage = ReadStage::Header;
         self.want = HEADER_LEN;
@@ -82,9 +73,9 @@ impl Session {
 }
 
 enum ReadIssue {
-    Buffered(usize), // n bytes already in buf; caller folds into got
-    Pending,         // op is in flight; event will re-signal on completion
-    Failed,          // read broken; caller should disconnect
+    Buffered(usize),
+    Pending,
+    Failed,
 }
 
 enum WriteIssue {
@@ -111,9 +102,6 @@ fn issue_read_at(s: &mut Session, offset: usize, count: usize) -> ReadIssue {
     }
 }
 
-// Begin a fresh op. Order is load-bearing: zero the OVERLAPPED, bind the
-// event, then ResetEvent before issuing, so a stale completion can't be
-// attributed to this op.
 fn begin_op(s: &mut Session) -> *mut c_void {
     unsafe {
         s.ol = mem::zeroed();
@@ -123,9 +111,6 @@ fn begin_op(s: &mut Session) -> *mut c_void {
     }
 }
 
-// Poll the op: Some(n) done (n bytes; 0 = broken), None = in flight. `expected`
-// turns a short write (bytes != len) into Some(0) so a half-written frame
-// disconnects instead of resuming.
 fn complete_op(s: &mut Session, expected: Option<usize>) -> Option<u32> {
     unsafe {
         let mut bytes: DWORD = 0;
@@ -165,17 +150,21 @@ fn rearm_connect(s: &mut Session) {
         let ol = begin_op(s);
         let ret = ffi::ConnectNamedPipe(s.pipe, ol);
         if ret != 0 || ffi::GetLastError() == ERROR_PIPE_CONNECTED {
-            // Client raced the rearm and connected first; signal to reap it.
             ffi::SetEvent(s.event);
         }
     }
 }
 
-fn disconnect_session(s: &mut Session) {
+fn disconnect_session(s: &mut Session, reason: DisconnectReason) {
+    #[cfg(not(debug_assertions))]
+    let _ = reason;
+    #[cfg(debug_assertions)]
+    if s.connected {
+        let n = CONNECTED.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        dbg(format_args!("disconnect reason={:?} count={}", reason, n));
+    }
     unsafe { ffi::DisconnectNamedPipe(s.pipe); }
     if matches!(s.op, SessionOp::ReadPending | SessionOp::WritePending) {
-        // Cancel the pending op and wait it out before rearming so a stale
-        // completion can't signal after ResetEvent.
         unsafe {
             let mut bytes: DWORD = 0;
             let _ = ffi::GetOverlappedResult(s.pipe, &mut s.ol as *mut _ as *mut c_void, &mut bytes, 1);
@@ -188,44 +177,39 @@ fn disconnect_session(s: &mut Session) {
     rearm_connect(s);
 }
 
-// Manual-reset event is still latched (WFMO never clears it) but the op is
-// still pending: clear the latch or the daemon spins. Same reasoning as begin_op.
 fn park(s: &mut Session) {
     unsafe { ffi::ResetEvent(s.event); }
 }
 
-// Reap the completed op into session state. Returns false to stop servicing.
 fn consume_completed_op(s: &mut Session) -> bool {
     match s.op {
         SessionOp::Connect => {
-            // Signal-based: no GetOverlappedResult (a connect reports 0 bytes);
-            // first read comes next.
             s.connected = true;
             s.op = SessionOp::Idle;
+            #[cfg(debug_assertions)]
+            {
+                let n = CONNECTED.fetch_add(1, Ordering::Relaxed) + 1;
+                dbg(format_args!("connect count={}", n));
+            }
             true
         }
         SessionOp::ReadPending => match complete_read(s) {
-            Some(0) => { disconnect_session(s); false }
+            Some(0) => { disconnect_session(s, DisconnectReason::ClientClosed); false }
             Some(n) => { s.op = SessionOp::Idle; s.got += n as usize; true }
             None => { park(s); false }
         },
         SessionOp::ReadBuffered(n) => { s.op = SessionOp::Idle; s.got += n; true }
         SessionOp::WritePending => match complete_write(s) {
-            Some(0) => { disconnect_session(s); false }
+            Some(0) => { disconnect_session(s, DisconnectReason::ClientClosed); false }
             Some(_) => { s.op = SessionOp::Idle; s.write_buf.clear(); true }
             None => { park(s); false }
         },
-        // No op in flight: unreachable, but reset to listening rather than
-        // wedge a silent session (client would hang; its Read has no timeout).
-        SessionOp::Idle => { disconnect_session(s); false }
+        SessionOp::Idle => { disconnect_session(s, DisconnectReason::IdleDefensive); false }
     }
 }
 
 enum NextRead { Pipelined, SelfWake }
 
-// Next header read after a response. Pipelined folds a buffered result and
-// keeps driving; SelfWake (firehose cap) defers the fold and self-wakes so
-// this session yields this iteration.
 fn issue_next_read(s: &mut Session, mode: NextRead) -> bool {
     match issue_read_at(s, 0, HEADER_LEN) {
         ReadIssue::Buffered(n) => {
@@ -239,7 +223,7 @@ fn issue_next_read(s: &mut Session, mode: NextRead) -> bool {
             }
         }
         ReadIssue::Pending => false,
-        ReadIssue::Failed => { disconnect_session(s); false }
+        ReadIssue::Failed => { disconnect_session(s, DisconnectReason::ClientClosed); false }
     }
 }
 
@@ -249,7 +233,7 @@ fn advance_stages(s: &mut Session, state: &mut DaemonState, served: &mut u32) ->
             match issue_read_at(s, s.got, s.want - s.got) {
                 ReadIssue::Buffered(n) => { s.got += n; }
                 ReadIssue::Pending => return false,
-                ReadIssue::Failed => { disconnect_session(s); return false; }
+                ReadIssue::Failed => { disconnect_session(s, DisconnectReason::ClientClosed); return false; }
             }
             continue;
         }
@@ -260,15 +244,13 @@ fn advance_stages(s: &mut Session, state: &mut DaemonState, served: &mut u32) ->
 fn advance_one_stage(s: &mut Session, state: &mut DaemonState, served: &mut u32) -> bool {
     match s.stage {
         ReadStage::Header => {
-            // Malformed frame: drop the connection; client falls back to its
-            // plain prompt.
             if s.buf[0] != PROTO_VERSION {
-                disconnect_session(s);
+                disconnect_session(s, DisconnectReason::Malformed);
                 return false;
             }
             let total_len = u32::from_le_bytes(s.buf[1..HEADER_LEN].try_into().unwrap()) as usize;
             if total_len > MAX_TOTAL_LEN {
-                disconnect_session(s);
+                disconnect_session(s, DisconnectReason::Malformed);
                 return false;
             }
             s.stage = ReadStage::Body;
@@ -282,17 +264,15 @@ fn advance_one_stage(s: &mut Session, state: &mut DaemonState, served: &mut u32)
 fn handle_complete_request(s: &mut Session, state: &mut DaemonState, served: &mut u32) -> bool {
     let prompt = match state.handle(&s.buf[..s.want]) {
         Ok(p) => p,
-        Err(_) => { disconnect_session(s); return false; }
+        Err(_) => { disconnect_session(s, DisconnectReason::HandleError); return false; }
     };
     stage_response(s, &prompt);
     *served += 1;
     s.reset_read_state();
-    // Async write: never block the daemon on a full out-buffer; a Pending
-    // write resumes when the client drains.
     match issue_write(s) {
         WriteIssue::Completed => {}
         WriteIssue::Pending => return false,
-        WriteIssue::Failed => { disconnect_session(s); return false; }
+        WriteIssue::Failed => { disconnect_session(s, DisconnectReason::WriteFailed); return false; }
     }
     if *served >= MAX_REQS_PER_WAKE {
         issue_next_read(s, NextRead::SelfWake)
@@ -302,11 +282,8 @@ fn handle_complete_request(s: &mut Session, state: &mut DaemonState, served: &mu
 }
 
 fn service_session(s: &mut Session, state: &mut DaemonState) {
-    // At rest a session always has one op outstanding; Idle is transient.
     debug_assert!(!matches!(s.op, SessionOp::Idle));
     let mut served = 0u32;
-    // Consume once, then drive stages; advance_stages always parks or
-    // disconnects, so one pass per wake.
     if !consume_completed_op(s) { return; }
     advance_stages(s, state, &mut served);
 }
@@ -332,10 +309,6 @@ fn create_sessions(pipe_name: &[u16]) -> Vec<Session> {
     sessions
 }
 
-// Service every signaled session (not WFMO's lowest-index result) so a
-// self-woken firehose session can't starve the rest. Eviction only fires on a
-// connect-reap (connected count hits MAX_SESSIONS), so a queued client always
-// finds a free instance.
 fn service_signaled_sessions(sessions: &mut [Session], state: &mut DaemonState) {
     for idx in 0..sessions.len() {
         let ev = sessions[idx].event;
@@ -350,7 +323,9 @@ fn service_signaled_sessions(sessions: &mut [Session], state: &mut DaemonState) 
             .min_by_key(|(_, s)| s.last_activity)
             .map(|(i, _)| i)
         {
-            disconnect_session(&mut sessions[i]);
+            #[cfg(debug_assertions)]
+            dbg(format_args!("cache full ({}), evicting LRU", MAX_SESSIONS));
+            disconnect_session(&mut sessions[i], DisconnectReason::LruEvict);
         }
     }
 }
@@ -381,11 +356,9 @@ impl Server {
         loop {
             for s in &self.sessions { self.handles.push(s.event); }
             for i in 0..self.state.watcher.num_entries() { self.handles.push(self.state.watcher.change_event(i)); }
-            // Pure event-driven: connect/write/watcher all wake via events, no tick.
             let total = self.handles.len() as DWORD;
             let rc = unsafe { ffi::WaitForMultipleObjects(total, self.handles.as_ptr(), 0, ffi::INFINITE) };
             if rc == ffi::WAIT_FAILED {
-                // Unreachable (const-asserted budget); fail loudly, don't spin.
                 eprintln!("starship-daemon: WaitForMultipleObjects failed (GetLastError={})", unsafe { ffi::GetLastError() });
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 self.handles.clear();
@@ -398,4 +371,23 @@ impl Server {
             self.handles.clear();
         }
     }
+}
+
+// ---- debug-only (all cfg(debug_assertions)) ----
+#[cfg(debug_assertions)]
+static CONNECTED: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug)]
+enum DisconnectReason {
+    LruEvict,
+    ClientClosed,
+    Malformed,
+    HandleError,
+    WriteFailed,
+    IdleDefensive,
+}
+
+#[cfg(debug_assertions)]
+fn dbg(args: std::fmt::Arguments) {
+    eprintln!("[dbg] {}", args);
 }

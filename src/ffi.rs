@@ -28,6 +28,22 @@ pub struct OVERLAPPED {
     pub h_event: HANDLE,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessPowerThrottlingState {
+    pub version: u32,
+    pub control_mask: u32,
+    pub state_mask: u32,
+}
+
+pub fn disable_power_throttling() {
+    unsafe {
+        let state = ProcessPowerThrottlingState { version: 1, control_mask: 0x1, state_mask: 0 };
+        let ptr = &state as *const ProcessPowerThrottlingState as *mut c_void;
+        let _ = SetProcessInformation(INVALID_HANDLE_VALUE, 4, ptr, std::mem::size_of::<ProcessPowerThrottlingState>() as u32);
+    }
+}
+
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -57,4 +73,5 @@ unsafe extern "system" {
     pub fn PeekNamedPipe(h: HANDLE, buf: LPVOID, buf_size: DWORD, bytes_read: LPDWORD, total_avail: LPDWORD, bytes_left: LPDWORD) -> BOOL;
     pub fn CancelIoEx(h: HANDLE, overlapped: *mut c_void) -> BOOL;
     pub fn SetNamedPipeHandleState(h: HANDLE, mode: LPDWORD, max_collect: LPDWORD, timeout: LPDWORD) -> BOOL;
+    pub fn SetProcessInformation(proc_: HANDLE, class: DWORD, info: LPVOID, size: DWORD) -> BOOL;
 }

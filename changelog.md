@@ -1,5 +1,26 @@
 potential async read in module
 
+improve module startup
+
+B (all candidates) is 275us faster median (1454→1179), p=0.0002
+
+verify B and A4 properly with full prompt function stuff
+- A1 env hoists (cache byte, pipe name) - already measured −9/−8us, reconfirm
+- A2 STARSHIP_CONFIG re-read vs cached-when-unchanged
+- A3 frame-build cache (rebuild only on input change) vs rebuild-every-call
+- A4 InViCommandMode + WindowSize.Width per-call cost (quantify floor)
+- A5 ProviderPath: plain vs $PWD.Path-for-FileSystem
+- B1 precommand Test-Path→bool - already measured −23us, reconfirm
+- B2 lazy $loc
+- B3 exit-code gate cost
+- C1 inline Get-StarshipPrompt into global:prompt (call overhead)
+
+move the temp opencode measuring stuff into the repo
+
+after an apparent improvement of testing, we found that A1/A2/A3/A5 is effective, and B1 is also effecti
+
+
+
 suppression:
 Why dropping those events is safe
 Key facts from the code:

@@ -1,15 +1,65 @@
 $script:DaemonPath = $env:STARSHIP_DAEMON_PATH
 $script:LastStarshipConfig = $null
 $script:DaemonPipe = $null
-$script:KeymapViBytes = [Text.Encoding]::UTF8.GetBytes("vi")
-$script:KeymapEmacsBytes = [Text.Encoding]::UTF8.GetBytes("emacs")
-$script:EmptyBytes = [Text.Encoding]::UTF8.GetBytes([string]$null)
+$script:RespBuf = $null
+# Daemon-down fast fallback: once unreachable, skip the Connect timeout and
+# return null straight to the fallback prompt; retry only when the tick fires.
+$script:DaemonDown = $false
+$script:DaemonDownRetryAt = [DateTime]::MinValue
+
+$script:FrameSrc = @"
+using System;
+using System.Text;
+public static class StarshipFrame {
+    static void W32(byte[] b, int o, uint v) { b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); b[o + 2] = (byte)(v >> 16); b[o + 3] = (byte)(v >> 24); }
+    static void W16(byte[] b, int o, ushort v) { b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); }
+    public static byte[] Build(string cwd, int exitCode, string keymap, int width, string config, byte disableCache) {
+        byte[] cb = Encoding.UTF8.GetBytes(cwd);
+        if (cb.Length > 32768) return null;
+        byte[] kb = keymap == null ? new byte[0] : Encoding.UTF8.GetBytes(keymap);
+        byte[] cf = config == null ? new byte[0] : Encoding.UTF8.GetBytes(config);
+        int bl = 17 + cb.Length + kb.Length + cf.Length;
+        byte[] buf = new byte[5 + bl];
+        buf[0] = 1;
+        W32(buf, 1, (uint)bl);
+        int o = 5;
+        W32(buf, o, (uint)cb.Length); o += 4;
+        Buffer.BlockCopy(cb, 0, buf, o, cb.Length); o += cb.Length;
+        W32(buf, o, unchecked((uint)exitCode)); o += 4;
+        W16(buf, o, (ushort)kb.Length); o += 2;
+        Buffer.BlockCopy(kb, 0, buf, o, kb.Length); o += kb.Length;
+        W32(buf, o, (uint)width); o += 4;
+        W16(buf, o, (ushort)cf.Length); o += 2;
+        Buffer.BlockCopy(cf, 0, buf, o, cf.Length); o += cf.Length;
+        buf[o] = disableCache;
+        return buf;
+    }
+    public static string Parse(byte[] b, int read) {
+        if (read < 4) return null;
+        int len = (int)(b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24));
+        if (len <= 0 || len > 65531 || read < 4 + len) return null;
+        return Encoding.UTF8.GetString(b, 4, len);
+    }
+}
+"@
+$frameHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:FrameSrc))).Replace('-', '')
+$frameAsm = Join-Path $PSScriptRoot "StarshipFrame-$frameHash.dll"
+if (Test-Path -LiteralPath $frameAsm)
+{
+    Add-Type -Path $frameAsm
+} else
+{
+    # -OutputAssembly writes the DLL but does NOT register the type; load it.
+    Add-Type -TypeDefinition $script:FrameSrc -OutputAssembly $frameAsm
+    Add-Type -Path $frameAsm
+}
 
 function Start-StarshipDaemon
 {
     if ([string]::IsNullOrEmpty($script:DaemonPath))
     { return }
-    if ((Get-Process -Name starship-daemon -ErrorAction SilentlyContinue).Count -eq 0)
+    $procName = [System.IO.Path]::GetFileNameWithoutExtension($script:DaemonPath)
+    if ((Get-Process -Name $procName -ErrorAction SilentlyContinue).Count -eq 0)
     {
         $null = Start-Process -FilePath $script:DaemonPath -WindowStyle Hidden
     }
@@ -18,6 +68,15 @@ function Start-StarshipDaemon
 function Get-StarshipPrompt
 {
     param([int]$ExitCode, [string]$Keymap, [int]$Width)
+
+    # Daemon-down fast path: skip the 10ms Connect timeout and the pipe null-check
+    # while flagged; return null so global:prompt serves the plain fallback.
+    if ($script:DaemonDown)
+    {
+        if ([DateTime]::UtcNow -lt $script:DaemonDownRetryAt)
+        { return $null }
+        $script:DaemonDown = $false
+    }
 
     for ($attempt = 0; $attempt -lt 2; $attempt++)
     {
@@ -33,69 +92,47 @@ function Get-StarshipPrompt
                 $p
             } catch
             {
+                $script:DaemonDown = $true
+                $script:DaemonDownRetryAt = [DateTime]::UtcNow.AddSeconds(3)
                 return $null
             }
             $script:DaemonPipe = $pipe
         }
 
         $cwd = $PWD.ProviderPath
-        $cwdBytes = [Text.Encoding]::UTF8.GetBytes($cwd)
-
-        if ($cwdBytes.Length -gt 32768)
-        {
-            return $null
-        }
 
         $failed = $false
         $result = $null
         try
         {
-            $keymapBytes = if ($Keymap -eq "vi") { $script:KeymapViBytes } else { $script:KeymapEmacsBytes }
+            $keymap = if ($Keymap -eq "vi") { "vi" } else { "emacs" }
             $currentCfg = $env:STARSHIP_CONFIG
             $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
-            if ($cfgChanged)
-            {
-                $configBytes = [Text.Encoding]::UTF8.GetBytes($currentCfg)
-            } else
-            {
-                $configBytes = $script:EmptyBytes
-            }
+            $config = if ($cfgChanged) { $currentCfg } else { $null }
             $disableCache = 0
             if ($env:STARSHIP_DAEMON_CACHE -eq "0")
             { $disableCache = 1 }
 
-            $bodyLen = 4 + $cwdBytes.Length + 4 + 2 + $keymapBytes.Length + 4 + 2 + $configBytes.Length + 1
-            $buf = [byte[]]::new(5 + $bodyLen)
-            $buf[0] = 1
-            [BitConverter]::GetBytes([uint32]$bodyLen).CopyTo($buf, 1)
-            $o = 5
-            [BitConverter]::GetBytes([uint32]$cwdBytes.Length).CopyTo($buf, $o); $o += 4
-            $cwdBytes.CopyTo($buf, $o); $o += $cwdBytes.Length
-            [BitConverter]::GetBytes([int32]$ExitCode).CopyTo($buf, $o); $o += 4
-            [BitConverter]::GetBytes([uint16]$keymapBytes.Length).CopyTo($buf, $o); $o += 2
-            $keymapBytes.CopyTo($buf, $o); $o += $keymapBytes.Length
-            [BitConverter]::GetBytes([uint32]$Width).CopyTo($buf, $o); $o += 4
-            [BitConverter]::GetBytes([uint16]$configBytes.Length).CopyTo($buf, $o); $o += 2
-            $configBytes.CopyTo($buf, $o); $o += $configBytes.Length
-            $buf[$o] = [byte]$disableCache
+            $buf = [StarshipFrame]::Build($cwd, $ExitCode, $keymap, $Width, $config, [byte]$disableCache)
+            if ($null -eq $buf)
+            {
+                return $null
+            }
+
             $pipe.Write($buf, 0, $buf.Length)
             $pipe.Flush()
 
-            $respBuf = [byte[]]::new(65536)
+            $respBuf = $script:RespBuf
+            if ($null -eq $respBuf)
+            {
+                $respBuf = [byte[]]::new(65536)
+                $script:RespBuf = $respBuf
+            }
             $read = $pipe.Read($respBuf, 0, $respBuf.Length)
-            if ($read -lt 4)
+            $result = [StarshipFrame]::Parse($respBuf, $read)
+            if ($null -eq $result)
             {
                 $failed = $true
-            } else
-            {
-                $respLen = [BitConverter]::ToUInt32($respBuf, 0)
-                if ($respLen -le 0 -or $respLen -gt 65531 -or $read -lt 4 + $respLen)
-                {
-                    $failed = $true
-                } else
-                {
-                    $result = [Text.Encoding]::UTF8.GetString($respBuf, 4, $respLen)
-                }
             }
         } catch
         {
@@ -108,6 +145,8 @@ function Get-StarshipPrompt
             $script:DaemonPipe = $null
             if ($attempt -eq 0)
             { continue }
+            $script:DaemonDown = $true
+            $script:DaemonDownRetryAt = [DateTime]::UtcNow.AddSeconds(3)
             return $null
         }
 
@@ -120,25 +159,37 @@ function Get-StarshipPrompt
     return $null
 }
 
-function Disable-StarshipDaemon
+function Disconnect-StarshipDaemon
 {
     if ($null -ne $script:DaemonPipe)
     {
         $script:DaemonPipe.Dispose()
         $script:DaemonPipe = $null
     }
-    Get-Process -Name starship-daemon -ErrorAction SilentlyContinue |
+}
+
+function Stop-StarshipDaemon
+{
+    Disconnect-StarshipDaemon
+    if ([string]::IsNullOrEmpty($script:DaemonPath))
+    { return }
+    $procName = [System.IO.Path]::GetFileNameWithoutExtension($script:DaemonPath)
+    Get-Process -Name $procName -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-$MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = { Disable-StarshipDaemon }
+$MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = { Disconnect-StarshipDaemon }
 
 $env:VIRTUAL_ENV_DISABLE_PROMPT = 1
 $env:STARSHIP_SHELL = if ($PSVersionTable.PSVersion.Major -gt 5) { "pwsh" } else { "powershell" }
 
 Start-StarshipDaemon
 
-Set-PSReadLineOption -ContinuationPrompt "· "
+try
+{
+    Set-PSReadLineOption -ContinuationPrompt "· "
+}
+catch { }
 
 function global:prompt
 {
@@ -194,3 +245,5 @@ function global:prompt
         }
     }
 }
+
+Export-ModuleMember -Function global:prompt

@@ -51,12 +51,12 @@ foreach ($v in $variants) {
     Set-Location $targetDir
 
     Remove-Module starship-daemon -ErrorAction SilentlyContinue
-    Import-Module $modulePath -DisableNameChecking -Force
+    $mod = Import-Module $modulePath -DisableNameChecking -Force -PassThru
 
     function global:prompt {
         $lastExit = $LASTEXITCODE
         if ($lastExit -eq $null) { $lastExit = 0 }
-        $result = Get-StarshipPrompt -ExitCode $lastExit -Keymap '' -Width $Host.UI.RawUI.WindowSize.Width
+        $result = & $mod { param($ec) Get-StarshipPrompt -ExitCode $ec -Keymap '' -Width $Host.UI.RawUI.WindowSize.Width } $lastExit
         if (-not $result) { $script:nullCount++ }
         if ($result) { $result } else { "PS> " }
     }

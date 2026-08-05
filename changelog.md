@@ -1,12 +1,4 @@
-keymap cachekey does not seem to work
-
-does the .gitignore work well right now?
-- supporting all .gitignore functions
-- hot reloading
-- subdirs
-
-measure the time of &oldPrompt
-
+potential async read in module
 
 suppression:
 Why dropping those events is safe

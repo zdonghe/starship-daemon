@@ -15,24 +15,24 @@ fn render_output_reflects_git_status_changes() {
     let cfg = toml::Table::new();
 
     let git_dir = starship_daemon::find_git_dir(r.path());
-    let out1 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out1 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
     assert!(!out1.is_empty(), "first render should produce output");
 
     r.write("untracked.txt", "new");
     settle();
-    let out2 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out2 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
     assert!(!out2.is_empty());
     assert_ne!(out1, out2, "render output should change after file create");
 
     r.git(&["add", "untracked.txt"]);
     settle();
-    let out3 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out3 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
     assert!(!out3.is_empty());
     assert_ne!(out2, out3, "render output should change after git add");
 
     r.git(&["commit", "-m", "add untracked.txt"]);
     settle();
-    let out4 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg);
+    let out4 = cache::render_prompt_with_config(&render_ctx(r.path()), git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
     assert!(!out4.is_empty());
 }
 
@@ -48,8 +48,8 @@ fn render_output_is_deterministic() {
     };
 
     let git_dir = starship_daemon::find_git_dir(r.path());
-    let out1 = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg);
-    let out2 = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg);
+    let out1 = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
+    let out2 = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
     assert_eq!(out1, out2, "same inputs should produce same render output");
 }
 
@@ -65,8 +65,8 @@ fn render_auto_finds_git_dir_when_none_passed() {
     };
 
     let git_dir = starship_daemon::find_git_dir(r.path());
-    let explicit = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg);
-    let auto = cache::render_prompt_with_config(&ctx, None, &cfg);
+    let explicit = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
+    let auto = cache::render_prompt_with_config(&ctx, None, &cfg, cache::BustDir::Fresh);
     assert!(!auto.is_empty(), "auto-find fallback should produce output");
     assert_eq!(auto, explicit, "auto-find and explicit git_dir should render identically");
 }
@@ -101,8 +101,8 @@ fn different_cwd_produces_different_render() {
 
     let git_dir_main = starship_daemon::find_git_dir(r.path());
     let git_dir_sub = starship_daemon::find_git_dir(&nested);
-    let out_main = cache::render_prompt_with_config(&ctx_main, git_dir_main.as_deref(), &cfg);
-    let out_sub = cache::render_prompt_with_config(&ctx_sub, git_dir_sub.as_deref(), &cfg);
+    let out_main = cache::render_prompt_with_config(&ctx_main, git_dir_main.as_deref(), &cfg, cache::BustDir::Fresh);
+    let out_sub = cache::render_prompt_with_config(&ctx_sub, git_dir_sub.as_deref(), &cfg, cache::BustDir::Fresh);
     assert_ne!(out_main, out_sub, "render output should differ for different git repos");
 }
 
@@ -118,7 +118,7 @@ fn render_ctx(repo: &Path) -> cache::RenderContext {
 }
 
 fn render(repo: &Path, git_dir: Option<&Path>, cfg: &toml::Table) -> String {
-    cache::render_prompt_with_config(&render_ctx(repo), git_dir, cfg)
+    cache::render_prompt_with_config(&render_ctx(repo), git_dir, cfg, cache::BustDir::Fresh)
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn render_bare_repo_does_not_crash() {
         keymap: "vi".to_string(),
     };
     let git_dir = starship_daemon::find_git_dir(&bare_path);
-    let out = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg);
+    let out = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg, cache::BustDir::Fresh);
     assert!(!out.is_empty(), "bare repo render should produce output");
 }
 

@@ -86,7 +86,7 @@ impl DaemonState {
 
     fn render_prompt(&mut self, ctx: &RenderContext, git_dir: Option<&Path>, disable_cache: bool, config_mtime: u64) -> String {
         if disable_cache {
-            return cache::render_prompt_with_config(ctx, git_dir, &self.cached_config);
+            return cache::render_prompt_with_config(ctx, git_dir, &self.cached_config, cache::BustDir::Fresh);
         }
         let watcher_version = if let Some(repo) = git_dir.and_then(Path::parent) {
             self.watcher.ensure(repo);

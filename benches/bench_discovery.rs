@@ -22,7 +22,7 @@ fn bench_one_repo(
         status_code: 0,
         keymap: "viins".into(),
     };
-    let _ = cache::render_prompt_with_config(&warm_ctx, git_dir.as_deref(), config);
+    let _ = cache::render_prompt_with_config(&warm_ctx, git_dir.as_deref(), config, cache::BustDir::Fresh);
 
     let trials: Vec<(&str, &str)> = vec![
         ("full prompt", full_format),
@@ -50,7 +50,7 @@ fn bench_one_repo(
                 toml::Value::String(mod_fmt.to_string()),
             );
             let t = Instant::now();
-            let _ = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &mod_cfg);
+            let _ = cache::render_prompt_with_config(&ctx, git_dir.as_deref(), &mod_cfg, cache::BustDir::Fresh);
             total += t.elapsed();
         }
         let avg_us = total.as_secs_f64() / N as f64 * 1_000_000.0;

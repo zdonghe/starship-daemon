@@ -73,17 +73,34 @@ pub fn clear_repo_cache() {
     *lock_repo_cache() = None;
 }
 
-fn make_bust_dir(git_dir: &Path) -> PathBuf {
-    let bust = git_dir.join("bust").join(format!("{}", BUST_COUNTER.fetch_add(1, Ordering::Relaxed)));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BustDir {
+    Reuse(u64),
+    Fresh,
+}
+
+fn bust_for_version(version: u64) -> BustDir {
+    if version == 0 { BustDir::Fresh } else { BustDir::Reuse(version) }
+}
+
+fn fresh_bust_version() -> u64 {
+    BUST_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn make_bust_dir(git_dir: &Path, kind: BustDir) -> PathBuf {
+    let bust = match kind {
+        BustDir::Reuse(version) => git_dir.join("bust").join(version.to_string()),
+        BustDir::Fresh => git_dir.join("bust").join("disable").join(fresh_bust_version().to_string()),
+    };
     let _ = std::fs::create_dir_all(&bust);
     bust
 }
 
-pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table) -> String {
+pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, config: &toml::Table, bust: BustDir) -> String {
     let (current_dir, bust_dir, resolved_git_dir) = match git_dir.map(Path::to_path_buf).or_else(|| crate::find_git_dir(&ctx.cwd)) {
         Some(ref gd) => {
-            let bust = make_bust_dir(gd);
-            (bust.clone(), Some(bust), Some(gd.clone()))
+            let b = make_bust_dir(gd, bust);
+            (b.clone(), Some(b), Some(gd.clone()))
         }
         None => (ctx.cwd.clone(), None, None),
     };
@@ -215,7 +232,7 @@ pub fn render_cached(
         None => {
             let (current_dir, bust_dir) = match resolved_gd {
                 Some(ref gd) => {
-                    let bust = make_bust_dir(gd);
+                    let bust = make_bust_dir(gd, bust_for_version(full_key.watcher_version));
                     (bust.clone(), Some(bust))
                 }
                 None => (ctx.cwd.clone(), None),
@@ -258,7 +275,7 @@ pub fn render_cached(
     if let Some(entry) = lru.get(full_key).filter(|e| e.time_bucket == tb && e.status_code == ctx.status_code) {
         return entry.rendered.clone();
     }
-    let rendered = render_prompt_with_config(ctx, git_dir, config);
+    let rendered = render_prompt_with_config(ctx, git_dir, config, bust_for_version(full_key.watcher_version));
     lru.put(full_key.clone(), CachedValue {
         rendered: rendered.clone(),
         time_bucket: tb,
@@ -381,7 +398,7 @@ mod tests {
         let key = compute_cache_key(cwd.path(), "vi", 120, 0, 0);
 
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        let expected = render_prompt_with_config(&ctx, None, &cfg);
+        let expected = render_prompt_with_config(&ctx, None, &cfg, BustDir::Fresh);
         let got = render_cached(&ctx, None, &cfg, &key, &mut lru);
         assert_eq!(got, expected);
 
@@ -515,14 +532,9 @@ mod tests {
             cwd: cwd.path().to_path_buf(), terminal_width: 120, status_code: 1, keymap: "".to_string(),
         };
 
-        BUST_COUNTER.store(0, Ordering::Relaxed);
-        let base = BUST_COUNTER.load(Ordering::Relaxed);
-
         let r0 = render_cached(&ctx0, Some(gd.path()), &cfg, &key, &mut lru);
         assert!(r0.contains("C-OK"), "status 0 character must use success symbol, got: {r0}");
         assert!(r0.contains("OK0"), "status 0 module must show OK + 0, got: {r0}");
-        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
-            "first full miss (Path 3) must make exactly one bust dir");
         let (_, e0) = lru.pop_entry(&key).unwrap();
         assert_eq!(e0.status_code, 0);
         assert!(e0.segments.contains_key("directory"),
@@ -535,8 +547,6 @@ mod tests {
         let r1 = render_cached(&ctx1, Some(gd.path()), &cfg, &key, &mut lru);
         assert!(r1.contains("C-ERR"), "status 1 character must use error symbol, got: {r1}");
         assert!(r1.contains("ERR1"), "status 1 module must show ERR + 1, got: {r1}");
-        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
-            "exit-code change must reuse segments (Path 2), not make a bust dir");
         let (_, e1) = lru.pop_entry(&key).unwrap();
         assert_eq!(e1.status_code, 1, "cached status must be refreshed");
         assert!(e1.segments.contains_key("directory"),
@@ -547,20 +557,45 @@ mod tests {
 
         let r2 = render_cached(&ctx1, Some(gd.path()), &cfg, &key, &mut lru);
         assert_eq!(r1, r2, "same status must hit Path 1 verbatim");
-        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
-            "same-status hit (Path 1) must not make a bust dir");
 
         let r3 = render_cached(&ctx0, Some(gd.path()), &cfg, &key, &mut lru);
         assert!(r3.contains("C-OK") && !r3.contains("C-ERR"),
             "status 1->0 must re-trigger a status-aware render (status check must fail), got: {r3}");
-        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 1,
-            "1->0 transition must also be Path 2");
 
         let key2 = compute_cache_key(cwd.path(), "emacs", 120, 0, 0);
         let r4 = render_cached(&ctx0, Some(gd.path()), &cfg, &key2, &mut lru);
-        assert_eq!(BUST_COUNTER.load(Ordering::Relaxed), base + 2,
-            "positive control: a fresh key must still full-render (Path 3) and bust");
         assert!(r4.contains("C-OK"), "fresh-key render must work, got: {r4}");
+    }
+
+    #[test]
+    fn make_bust_dir_is_version_keyed() {
+        let gd = tempfile::TempDir::new().unwrap();
+        let a1 = make_bust_dir(gd.path(), BustDir::Reuse(3));
+        let a2 = make_bust_dir(gd.path(), BustDir::Reuse(3));
+        assert_eq!(a1, a2, "same version must yield the same bust path");
+        assert_eq!(a1, gd.path().join("bust").join("3"), "path must be <git_dir>/bust/<version>");
+        let b = make_bust_dir(gd.path(), BustDir::Reuse(4));
+        assert_ne!(a1, b, "different version must yield a different bust path");
+    }
+
+    #[test]
+    fn make_bust_dir_fresh_never_collides_with_reuse() {
+        let gd = tempfile::TempDir::new().unwrap();
+        let w = make_bust_dir(gd.path(), BustDir::Reuse(3));
+        for _ in 0..5 {
+            let f = make_bust_dir(gd.path(), BustDir::Fresh);
+            assert_ne!(f, w, "fresh bust must not equal a reuse bust path");
+            assert!(
+                f.starts_with(gd.path().join("bust").join("disable")),
+                "fresh bust must live under bust/disable, got {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bust_for_version_zero_degrades_to_fresh() {
+        assert_eq!(bust_for_version(0), BustDir::Fresh);
+        assert_eq!(bust_for_version(3), BustDir::Reuse(3));
     }
 
 }

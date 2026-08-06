@@ -14,7 +14,7 @@ fn render_cold(cwd: &PathBuf, config: &Table) -> String {
         status_code: 0,
         keymap: "viins".to_string(),
     };
-    cache::render_prompt_with_config(&ctx, None, config)
+    cache::render_prompt_with_config(&ctx, None, config, cache::BustDir::Fresh)
 }
 
 fn main() {
@@ -80,7 +80,7 @@ fn main() {
             keymap: "viins".to_string(),
         };
         let start = Instant::now();
-        let _ = cache::render_prompt_with_config(&ctx, None, &config);
+        let _ = cache::render_prompt_with_config(&ctx, None, &config, cache::BustDir::Fresh);
         let elapsed = start.elapsed().as_nanos() as f64 / 1_000_000.0;
         if i >= 1 { total += elapsed; } // skip first (filesystem cold cache)
     }

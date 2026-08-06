@@ -2,10 +2,16 @@ $script:DaemonPath = $env:STARSHIP_DAEMON_PATH
 $script:LastStarshipConfig = $null
 $script:DaemonPipe = $null
 $script:RespBuf = $null
-# Daemon-down fast fallback: once unreachable, skip the Connect timeout and
-# return null straight to the fallback prompt; retry only when the tick fires.
 $script:DaemonDown = $false
 $script:DaemonDownRetryAt = [DateTime]::MinValue
+
+$script:DaemonPipeName = if ($env:STARSHIP_DAEMON_PIPE) { $env:STARSHIP_DAEMON_PIPE } else { "starship-daemon" }
+$script:LastBuildKey = $null
+$script:LastBuildBuf = $null
+if (-not (Test-Path function:Invoke-Starship-PreCommand))
+{
+    function global:Invoke-Starship-PreCommand { }
+}
 
 $script:FrameSrc = @"
 using System;
@@ -49,7 +55,6 @@ if (Test-Path -LiteralPath $frameAsm)
     Add-Type -Path $frameAsm
 } else
 {
-    # -OutputAssembly writes the DLL but does NOT register the type; load it.
     Add-Type -TypeDefinition $script:FrameSrc -OutputAssembly $frameAsm
     Add-Type -Path $frameAsm
 }
@@ -69,8 +74,6 @@ function Get-StarshipPrompt
 {
     param([int]$ExitCode, [string]$Keymap, [int]$Width)
 
-    # Daemon-down fast path: skip the 10ms Connect timeout and the pipe null-check
-    # while flagged; return null so global:prompt serves the plain fallback.
     if ($script:DaemonDown)
     {
         if ([DateTime]::UtcNow -lt $script:DaemonDownRetryAt)
@@ -85,7 +88,7 @@ function Get-StarshipPrompt
         {
             $pipe = try
             {
-                $pipeName = if ($env:STARSHIP_DAEMON_PIPE) { $env:STARSHIP_DAEMON_PIPE } else { "starship-daemon" }
+                $pipeName = $script:DaemonPipeName
                 $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
                 $p.Connect(10)
                 $p.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
@@ -113,7 +116,13 @@ function Get-StarshipPrompt
             if ($env:STARSHIP_DAEMON_CACHE -eq "0")
             { $disableCache = 1 }
 
-            $buf = [StarshipFrame]::Build($cwd, $ExitCode, $keymap, $Width, $config, [byte]$disableCache)
+            $buildKey = "$cwd|$ExitCode|$keymap|$Width|$config|$disableCache"
+            if ($buildKey -ne $script:LastBuildKey)
+            {
+                $script:LastBuildKey = $buildKey
+                $script:LastBuildBuf = [StarshipFrame]::Build($cwd, $ExitCode, $keymap, $Width, $config, [byte]$disableCache)
+            }
+            $buf = $script:LastBuildBuf
             if ($null -eq $buf)
             {
                 return $null
@@ -198,13 +207,8 @@ function global:prompt
 
     try
     {
-        if (Test-Path function:Invoke-Starship-PreCommand)
-        {
-            Invoke-Starship-PreCommand
-        }
+        Invoke-Starship-PreCommand
     } catch { }
-
-    $loc = $executionContext.SessionState.Path.CurrentLocation
 
     $exitCode = 0
     if (-not $origDollarQuestion)
@@ -227,6 +231,7 @@ function global:prompt
 
     if (-not $result)
     {
+        $loc = $executionContext.SessionState.Path.CurrentLocation
         $result = "PS $($loc.ProviderPath)> "
     }
 

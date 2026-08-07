@@ -290,6 +290,141 @@ mod tests {
         assert!(d.lru.len() > cached, "watcher version change must bust the cache key");
     }
 
+    #[cfg(fork_starship)]
+    fn status_cfg(dir: &tempfile::TempDir) -> PathBuf {
+        let p = dir.path().join("starship.toml");
+        std::fs::write(&p, "\
+format = \"$git_status\"
+add_newline = false
+[git_status]
+format = \"$conflicted$stashed$deleted$renamed$modified$staged$untracked\"\n").unwrap();
+        p
+    }
+
+    #[cfg(fork_starship)]
+    fn std_config(dir: &tempfile::TempDir) -> PathBuf {
+        let p = dir.path().join("starship.toml");
+        std::fs::write(&p, "\
+format = \"$git_status\"
+add_newline = false
+[git_status]
+format = \"$modified$untracked\"\n").unwrap();
+        p
+    }
+
+    #[cfg(fork_starship)]
+    fn wait_status(d: &mut DaemonState, repo: &std::path::Path, req: &[u8], before: &str) -> String {
+        let before_ver = d.watcher.version(repo);
+        wait_for_bump(&mut d.watcher, repo, before_ver);
+        let out = d.handle(req).unwrap();
+        assert_ne!(out, before, "status must update in real time after repo change");
+        out
+    }
+
+    #[cfg(fork_starship)]
+    #[test]
+    fn tracked_worktree_edit_updates_status_in_real_time() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_cmd(&repo, &["init"]);
+        git_cmd(&repo, &["config", "user.email", "test@test"]);
+        git_cmd(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("a.txt"), "hello").unwrap();
+        git_cmd(&repo, &["add", "a.txt"]);
+        git_cmd(&repo, &["commit", "-m", "initial"]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let cfg = status_cfg(&dir);
+        let mut d = DaemonState::new(cfg).unwrap();
+        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+
+        let out_clean = d.handle(&req).unwrap();
+        assert!(!out_clean.contains('!'), "clean tree must show no modifications: {out_clean:?}");
+
+        std::fs::write(repo.join("a.txt"), "hello world").unwrap();
+        let out_mod = wait_status(&mut d, &repo, &req, &out_clean);
+        assert!(out_mod.contains('!'), "tracked edit must show modified symbol, got {out_mod:?}");
+
+        git_cmd(&repo, &["checkout", "--", "a.txt"]);
+        let out_restored = wait_status(&mut d, &repo, &req, &out_mod);
+        assert!(!out_restored.contains('!'), "restore must clear modified, got {out_restored:?}");
+    }
+
+    #[cfg(fork_starship)]
+    #[test]
+    fn untracked_create_updates_status_in_real_time() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_cmd(&repo, &["init"]);
+        git_cmd(&repo, &["config", "user.email", "test@test"]);
+        git_cmd(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("a.txt"), "hello").unwrap();
+        git_cmd(&repo, &["add", "a.txt"]);
+        git_cmd(&repo, &["commit", "-m", "initial"]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let cfg = status_cfg(&dir);
+        let mut d = DaemonState::new(cfg).unwrap();
+        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+        let out_clean = d.handle(&req).unwrap();
+        assert!(!out_clean.contains('?'), "clean tree must not show untracked, got {out_clean:?}");
+
+        std::fs::write(repo.join("new.txt"), "x").unwrap();
+        let out = wait_status(&mut d, &repo, &req, &out_clean);
+        assert!(out.contains('?'), "untracked file must show ? in real time, got {out:?}");
+    }
+
+    #[cfg(fork_starship)]
+    #[test]
+    fn stash_creation_updates_status_in_real_time() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_cmd(&repo, &["init"]);
+        git_cmd(&repo, &["config", "user.email", "test@test"]);
+        git_cmd(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("a.txt"), "hello").unwrap();
+        git_cmd(&repo, &["add", "a.txt"]);
+        git_cmd(&repo, &["commit", "-m", "initial"]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let cfg = status_cfg(&dir);
+        let mut d = DaemonState::new(cfg.clone()).unwrap();
+        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+        let out_clean = d.handle(&req).unwrap();
+        assert!(!out_clean.contains('$'), "no stash expected, got {out_clean:?}");
+
+        std::fs::write(repo.join("a.txt"), "dirty").unwrap();
+        git_cmd(&repo, &["stash"]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let t = wait_status(&mut d, &repo, &req, &out_clean);
+        assert!(t.contains('$'), "stash must show $ symbol in real time, got {t:?}");
+    }
+
+    #[cfg(fork_starship)]
+    #[test]
+    fn no_change_reuses_cache_no_bump() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_cmd(&repo, &["init"]);
+        git_cmd(&repo, &["config", "user.email", "test@test"]);
+        git_cmd(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("a.txt"), "hello").unwrap();
+        git_cmd(&repo, &["add", "a.txt"]);
+        git_cmd(&repo, &["commit", "-m", "initial"]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let cfg = std_config(&dir);
+        let mut d = DaemonState::new(cfg).unwrap();
+        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+        let out1 = d.handle(&req).unwrap();
+        let v1 = d.watcher.version(&repo);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let out2 = d.handle(&req).unwrap();
+        let v2 = d.watcher.version(&repo);
+        assert_eq!(out1, out2, "steady state must return identical output");
+        assert_eq!(v1, v2, "no change must not bump watcher version");
+    }
+
     #[test]
     fn missing_explicit_config_falls_back_to_mtime() {
         let dir = tempfile::TempDir::new().unwrap();

@@ -75,12 +75,12 @@ pub fn clear_repo_cache() {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BustDir {
-    Reuse(u64),
+    Reuse { version: u64, config_mtime: u64 },
     Fresh,
 }
 
-fn bust_for_version(version: u64) -> BustDir {
-    if version == 0 { BustDir::Fresh } else { BustDir::Reuse(version) }
+fn bust_for_version(version: u64, config_mtime: u64) -> BustDir {
+    if version == 0 { BustDir::Fresh } else { BustDir::Reuse { version, config_mtime } }
 }
 
 fn fresh_bust_version() -> u64 {
@@ -89,7 +89,7 @@ fn fresh_bust_version() -> u64 {
 
 fn make_bust_dir(git_dir: &Path, kind: BustDir) -> PathBuf {
     let bust = match kind {
-        BustDir::Reuse(version) => git_dir.join("bust").join(version.to_string()),
+        BustDir::Reuse { version, config_mtime } => git_dir.join("bust").join(version.to_string()).join(config_mtime.to_string()),
         BustDir::Fresh => git_dir.join("bust").join("disable").join(fresh_bust_version().to_string()),
     };
     let _ = std::fs::create_dir_all(&bust);
@@ -232,7 +232,7 @@ pub fn render_cached(
         None => {
             let (current_dir, bust_dir) = match resolved_gd {
                 Some(ref gd) => {
-                    let bust = make_bust_dir(gd, bust_for_version(full_key.watcher_version));
+                    let bust = make_bust_dir(gd, bust_for_version(full_key.watcher_version, full_key.config_mtime));
                     (bust.clone(), Some(bust))
                 }
                 None => (ctx.cwd.clone(), None),
@@ -275,7 +275,7 @@ pub fn render_cached(
     if let Some(entry) = lru.get(full_key).filter(|e| e.time_bucket == tb && e.status_code == ctx.status_code) {
         return entry.rendered.clone();
     }
-    let rendered = render_prompt_with_config(ctx, git_dir, config, bust_for_version(full_key.watcher_version));
+    let rendered = render_prompt_with_config(ctx, git_dir, config, bust_for_version(full_key.watcher_version, full_key.config_mtime));
     lru.put(full_key.clone(), CachedValue {
         rendered: rendered.clone(),
         time_bucket: tb,
@@ -570,18 +570,20 @@ mod tests {
     #[test]
     fn make_bust_dir_is_version_keyed() {
         let gd = tempfile::TempDir::new().unwrap();
-        let a1 = make_bust_dir(gd.path(), BustDir::Reuse(3));
-        let a2 = make_bust_dir(gd.path(), BustDir::Reuse(3));
-        assert_eq!(a1, a2, "same version must yield the same bust path");
-        assert_eq!(a1, gd.path().join("bust").join("3"), "path must be <git_dir>/bust/<version>");
-        let b = make_bust_dir(gd.path(), BustDir::Reuse(4));
+        let a1 = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
+        let a2 = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
+        assert_eq!(a1, a2, "same version+mtime must yield the same bust path");
+        assert_eq!(a1, gd.path().join("bust").join("3").join("7"), "path must be <git_dir>/bust/<version>/<config_mtime>");
+        let b = make_bust_dir(gd.path(), BustDir::Reuse { version: 4, config_mtime: 7 });
         assert_ne!(a1, b, "different version must yield a different bust path");
+        let c = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 8 });
+        assert_ne!(a1, c, "different config_mtime must yield a different bust path");
     }
 
     #[test]
     fn make_bust_dir_fresh_never_collides_with_reuse() {
         let gd = tempfile::TempDir::new().unwrap();
-        let w = make_bust_dir(gd.path(), BustDir::Reuse(3));
+        let w = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
         for _ in 0..5 {
             let f = make_bust_dir(gd.path(), BustDir::Fresh);
             assert_ne!(f, w, "fresh bust must not equal a reuse bust path");
@@ -594,8 +596,9 @@ mod tests {
 
     #[test]
     fn bust_for_version_zero_degrades_to_fresh() {
-        assert_eq!(bust_for_version(0), BustDir::Fresh);
-        assert_eq!(bust_for_version(3), BustDir::Reuse(3));
+        assert_eq!(bust_for_version(0, 7), BustDir::Fresh);
+        assert_eq!(bust_for_version(3, 0), BustDir::Reuse { version: 3, config_mtime: 0 });
+        assert_eq!(bust_for_version(3, 7), BustDir::Reuse { version: 3, config_mtime: 7 });
     }
 
 }

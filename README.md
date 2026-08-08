@@ -15,7 +15,7 @@ $env:STARSHIP_DAEMON_PATH = "C:\path\to\starship-daemon.exe"
 Import-Module "C:\path\to\starship-daemon.psm1" -DisableNameChecking
 ```
 
-The module auto-starts the daemon and replaces the `prompt` function. It also preserves `$?` and `$LASTEXITCODE` across prompt rendering, so no wrapper is needed.
+The module auto-starts the daemon and replaces the `prompt` function. 
 
 To run code before every prompt (like official starship's `Invoke-Starship-PreCommand` hook), define a global function with that name:
 
@@ -37,15 +37,16 @@ $env:STARSHIP_CONFIG = "C:\path\to\starship.toml"
 
 Hot reloading is supported.
 
-## Caching
+## Build
 
-The daemon caches prompts by (cwd, keymap, terminal width, config mtime, watcher generation). The exit code is decoupled from the cache: only the `status` and `character` modules read it, so they are re-rendered live on an exit-code change while the rest of the prompt reuses cached segments.
+```
+cargo build --release
+```
 
-The watcher tracks the entire directory for changes, which tells us when to invalidate the cache and re-render/re-compute something, such as `git status`.
+The daemon auto-detects at build time (via `build.rs`) which starship it's compiled against:
 
-Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
-
-In a stock build, starship exposes no segment API, so the whole rendered prompt is cached instead.
+- **Default (stock starship)**: the `starship` crate resolves from crates.io. The daemon compiles with the stock render API.
+- **Gix-native fork (optional)**: a `[patch.crates-io]` block in `Cargo.toml` pointing at my personal starship fork (`github.com/zdonghe/starship`). When that patch is active, `build.rs` detects it from `Cargo.lock` and enables the fork's segment-level cache API.
 
 ## Performance
 
@@ -60,17 +61,17 @@ a non-git desktop folder, the [starship](https://github.com/starship/starship) r
 | IPC + gix-native + daemon cache | **0.20 ms** | **0.14 ms** | **0.21 ms** |
 
 
-## Build
+## Caching
 
-```
-cargo build --release
-```
+The daemon caches prompts by (cwd, keymap, terminal width, config mtime, watcher generation).
 
-The daemon auto-detects at build time (via `build.rs`) which starship it's compiled against:
+The watcher tracks the entire directory for changes, which tells us when to invalidate the cache and re-render/re-compute something, such as `git status`.
 
-- **Default (stock starship)**: the `starship` crate resolves from crates.io. The daemon compiles with the stock render API.
-- **Gix-native fork (optional)**: a `[patch.crates-io]` block in `Cargo.toml` pointing at my personal starship fork (`github.com/zdonghe/starship`). When that patch is active, `build.rs` detects it from `Cargo.lock` and enables the fork's segment-level cache API.
+Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 
+In a stock build, starship exposes no segment API, so the whole rendered prompt is cached instead. If the daemon is built with my fork, then segment level caching will be used.
+
+There is segment level caching for the following modules: time, character, status, all. This means that if any of those modules become invalid/outdated, that specific module can be recomputed without needing to recompute the entire prompt.
 
 ## Benchmarking
 

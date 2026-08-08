@@ -3,7 +3,6 @@ $script:LastStarshipConfig = $null
 $script:DaemonPipe = $null
 $script:RespBuf = $null
 $script:DaemonDown = $false
-$script:DaemonDownRetryAt = [DateTime]::MinValue
 
 $script:DaemonPipeName = if ($env:STARSHIP_DAEMON_PIPE) { $env:STARSHIP_DAEMON_PIPE } else { "starship-daemon" }
 $script:LastBuildKey = $null
@@ -61,6 +60,7 @@ if (Test-Path -LiteralPath $frameAsm)
 
 function Start-StarshipDaemon
 {
+    $script:DaemonDown = $false
     if ([string]::IsNullOrEmpty($script:DaemonPath))
     { return }
     $procName = [System.IO.Path]::GetFileNameWithoutExtension($script:DaemonPath)
@@ -75,97 +75,84 @@ function Get-StarshipPrompt
     param([int]$ExitCode, [string]$Keymap, [int]$Width)
 
     if ($script:DaemonDown)
+    { return $null }
+
+    $pipe = $script:DaemonPipe
+    if ($null -eq $pipe)
     {
-        if ([DateTime]::UtcNow -lt $script:DaemonDownRetryAt)
-        { return $null }
-        $script:DaemonDown = $false
-    }
-
-    for ($attempt = 0; $attempt -lt 2; $attempt++)
-    {
-        $pipe = $script:DaemonPipe
-        if ($null -eq $pipe)
+        $pipe = try
         {
-            $pipe = try
-            {
-                $pipeName = $script:DaemonPipeName
-                $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
-                $p.Connect(10)
-                $p.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
-                $p
-            } catch
-            {
-                $script:DaemonDown = $true
-                $script:DaemonDownRetryAt = [DateTime]::UtcNow.AddSeconds(3)
-                return $null
-            }
-            $script:DaemonPipe = $pipe
-        }
-
-        $cwd = $PWD.ProviderPath
-
-        $failed = $false
-        $result = $null
-        try
-        {
-            $keymap = if ($Keymap -eq "vi") { "vi" } else { "emacs" }
-            $currentCfg = $env:STARSHIP_CONFIG
-            $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
-            $config = if ($cfgChanged) { $currentCfg } else { $null }
-            $disableCache = 0
-            if ($env:STARSHIP_DAEMON_CACHE -eq "0")
-            { $disableCache = 1 }
-
-            $buildKey = "$cwd|$ExitCode|$keymap|$Width|$config|$disableCache"
-            if ($buildKey -ne $script:LastBuildKey)
-            {
-                $script:LastBuildKey = $buildKey
-                $script:LastBuildBuf = [StarshipFrame]::Build($cwd, $ExitCode, $keymap, $Width, $config, [byte]$disableCache)
-            }
-            $buf = $script:LastBuildBuf
-            if ($null -eq $buf)
-            {
-                return $null
-            }
-
-            $pipe.Write($buf, 0, $buf.Length)
-            $pipe.Flush()
-
-            $respBuf = $script:RespBuf
-            if ($null -eq $respBuf)
-            {
-                $respBuf = [byte[]]::new(65536)
-                $script:RespBuf = $respBuf
-            }
-            $read = $pipe.Read($respBuf, 0, $respBuf.Length)
-            $result = [StarshipFrame]::Parse($respBuf, $read)
-            if ($null -eq $result)
-            {
-                $failed = $true
-            }
+            $pipeName = $script:DaemonPipeName
+            $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
+            $p.Connect(10)
+            $p.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
+            $p
         } catch
         {
-            $failed = $true
-        }
-
-        if ($failed)
-        {
-            $pipe.Dispose()
-            $script:DaemonPipe = $null
-            if ($attempt -eq 0)
-            { continue }
             $script:DaemonDown = $true
-            $script:DaemonDownRetryAt = [DateTime]::UtcNow.AddSeconds(3)
+            return $null
+        }
+        $script:DaemonPipe = $pipe
+    }
+
+    $cwd = $PWD.ProviderPath
+
+    $failed = $false
+    $result = $null
+    try
+    {
+        $currentCfg = $env:STARSHIP_CONFIG
+        $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
+        $config = if ($cfgChanged) { $currentCfg } else { $null }
+        $disableCache = 0
+        if ($env:STARSHIP_DAEMON_CACHE -eq "0")
+        { $disableCache = 1 }
+
+        $buildKey = "$cwd|$ExitCode|$Keymap|$Width|$config|$disableCache"
+        if ($buildKey -ne $script:LastBuildKey)
+        {
+            $script:LastBuildKey = $buildKey
+            $script:LastBuildBuf = [StarshipFrame]::Build($cwd, $ExitCode, $Keymap, $Width, $config, [byte]$disableCache)
+        }
+        $buf = $script:LastBuildBuf
+        if ($null -eq $buf)
+        {
             return $null
         }
 
-        if ($cfgChanged)
+        $pipe.Write($buf, 0, $buf.Length)
+        $pipe.Flush()
+
+        $respBuf = $script:RespBuf
+        if ($null -eq $respBuf)
         {
-            $script:LastStarshipConfig = $currentCfg
+            $respBuf = [byte[]]::new(65536)
+            $script:RespBuf = $respBuf
         }
-        return $result
+        $read = $pipe.Read($respBuf, 0, $respBuf.Length)
+        $result = [StarshipFrame]::Parse($respBuf, $read)
+        if ($null -eq $result)
+        {
+            $failed = $true
+        }
+    } catch
+    {
+        $failed = $true
     }
-    return $null
+
+    if ($failed)
+    {
+        $pipe.Dispose()
+        $script:DaemonPipe = $null
+        $script:DaemonDown = $true
+        return $null
+    }
+
+    if ($cfgChanged)
+    {
+        $script:LastStarshipConfig = $currentCfg
+    }
+    return $result
 }
 
 function Disconnect-StarshipDaemon
@@ -251,4 +238,4 @@ function global:prompt
     }
 }
 
-Export-ModuleMember -Function global:prompt
+Export-ModuleMember -Function global:prompt, Start-StarshipDaemon

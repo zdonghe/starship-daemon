@@ -121,7 +121,7 @@ Pipe round-trip (1+2 ~459us) is ~76% of the stage sum.
   absolute us climb**. Numbers here were captured at 3s idle (shallow) unless noted.
 - Power plan + Turbo + current DVFS state change day-to-day; only the OFF-vs-ON ratio is stable.
 
-### Measurement tools (in C:\Users\Dong\AppData\Local\Temp\opencode\)
+### Measurement tools (in harness\, run from the repo root)
 - `e2e.ps1 -BudgetSeconds <n> -WarmSamples <m>` - REAL module E2E + per-stage breakdown.
   Invokes the actual `Get-StarshipPrompt` through module scope (`& $script:_mod { ... }`) and
   times 4 stages (ProviderPath / StarshipFrame::Build / pipe write+flush / pipe read) with QPC.
@@ -170,11 +170,11 @@ This is what produced the portion-3 numbers. It also explains why the older sing
   brackets shrink the pipe/wake away and reveal the logic delta cleanly (the racy
   A1+A2+A3+A5 bundle measured -38us warm / -177us cold, reproducible, p<0.0001 every run;
   the corrected shipped set - A1 pipe + A3 - measures -8us warm, head 44 vs final 36us).
-- Variant modules live under `C:\Users\Dong\AppData\Local\Temp\opencode\ab\` (`head` = pristine,
+- Variant modules live under `harness\ab\` (`head` = pristine,
   `single_*` single-candidate, `*_internal` = pristine-HEAD logic + bracket). A pristine base
-  `module_head.psm1` is hash-checked (B70BC4E8) before regenerating candidates. Rebuild generators:
-  `mk_internal2.ps1` (A-suite logic-bracket variants), `mk_prelude.ps1` (B-suite prelude-bracket
-  variants). Always re-verify 0 cross-contamination markers
+  `harness\module_head.psm1` is hash-checked (B70BC4E8) before regenerating candidates. Rebuild generators:
+  `harness\mk_internal2.ps1` (A-suite logic-bracket variants), `harness\mk_prelude.ps1` (B-suite prelude-bracket
+  variants), `harness\mk_corrected.ps1` (A1+A3 corrected set, logic + prelude brackets). Always re-verify 0 cross-contamination markers
   (`DaemonPipeName`/`DisableCacheByte`/`CachedConfig`/`LastBuildKey`/`$PWD.Provider.Name`) before
   trusting a module-side result.
 
@@ -194,16 +194,16 @@ This is what produced the portion-3 numbers. It also explains why the older sing
 cargo build --release
 
 # cold E2E + stage breakdown (medians + trim10):
-powershell -NoProfile -File C:\Users\Dong\AppData\Local\Temp\opencode\e2e.ps1 -BudgetSeconds 300 -WarmSamples 40
+powershell -NoProfile -File harness\e2e.ps1 -BudgetSeconds 300 -WarmSamples 40
 
 # portion-3 module A/B (interleaved two-process, cold 3s idle):
-Start-Process pwsh -ArgumentList @('-NoProfile','-File','C:\Users\Dong\AppData\Local\Temp\opencode\module_ab.ps1',`
+Start-Process pwsh -ArgumentList @('-NoProfile','-File','.\harness\module_ab.ps1',`
   '-N',150,'-Warm',30,'-IdleMs',3000,'-Tag','<tag>','-AModule','<head copy>','-BModule','<variant copy>',`
   '-AOut','<csv>','-BOut','<csv>') -WindowStyle Hidden -RedirectStandardOutput <log> -RedirectStandardError <err> -PassThru
 
 # same, warm (IdleMs 0, higher N) or a logic-only bracket via -Worker module_ab_worker_internal.ps1
 ```
-- e2e.ps1 sets cwd to C:\Users\Dong\Documents\Code\starship-daemon, imports the module via
+- e2e.ps1 sets cwd to the repo root (parent of harness\), imports the module via
   STARSHIP_DAEMON_PATH, starts the daemon, warms 25 calls, then samples cold every 3s until the
   budget elapses; finally a back-to-back warm run and the per-stage loop. It cleans up the daemon
   at the end.
@@ -214,16 +214,18 @@ Start-Process pwsh -ArgumentList @('-NoProfile','-File','C:\Users\Dong\AppData\L
 ### Reproducing the corrected module logic win (A1 pipe + A3)
 ```
 # build the two logic-bracket module copies (pristine HEAD vs applied/corrected):
-pwsh -NoProfile -File C:\Users\Dong\AppData\Local\Temp\opencode\mk_internal2.ps1
+pwsh -NoProfile -File harness\mk_internal2.ps1
+pwsh -NoProfile -File harness\mk_corrected.ps1
+pwsh -NoProfile -File harness\mk_prelude.ps1
 
 # warm logic bracket (N=2000, IdleMs 0): expect HEAD ~44us vs corrected ~36us, p<0.0001
 # (A5 is dropped - it made the bundle slower; A2 stays a per-call env read for correctness)
-# via module_ab.ps1 -Worker module_ab_worker_internal.ps1 -AModule ab\head_internal -BModule ab\<corrected>_internal
+# via module_ab.ps1 -Worker module_ab_worker_internal.ps1 -AModule ab\head_internal -BModule ab\corrected_internal
 ```
 
 ### Reproducing portion 1 (throttle OFF vs ON)
 ```
-powershell -NoProfile -File C:\Users\Dong\AppData\Local\Temp\opencode\throttle_stats.ps1
+powershell -NoProfile -File .\harness\throttle_stats.ps1
 ```
 Spawns daemon A with STARSHIP_DAEMON_THROTTLE=1 (ON) on pipe `starship-throttle-a`, daemon B without
 (OFF, opt-out) on `starship-throttle-b`, interleaves 150 samples each after 30-iter discard, and

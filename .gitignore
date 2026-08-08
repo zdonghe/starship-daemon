@@ -4,3 +4,5 @@ bench_results.md
 timing.log
 # compiled StarshipFrame helper DLL generated next to the module
 StarshipFrame-*.dll
+# regenerable harness outputs (variant modules, sample CSVs, logs)
+harness/ab/

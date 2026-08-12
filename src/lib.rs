@@ -240,11 +240,13 @@ mod tests {
 
     #[test]
     fn parse_request_total_len_over_cap() {
-
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(MAX_TOTAL_LEN as u32 + 1).to_le_bytes());
         assert!(parse_request(&data).is_none());
+    }
 
+    #[test]
+    fn parse_request_total_len_exact_cap_missing_body() {
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(MAX_TOTAL_LEN as u32).to_le_bytes());
         assert!(parse_request(&data).is_none());

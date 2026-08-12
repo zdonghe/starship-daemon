@@ -567,41 +567,7 @@ mod tests {
         assert!(r4.contains("C-OK"), "fresh-key render must work, got: {r4}");
     }
 
-    #[test]
-    fn make_bust_dir_is_version_keyed() {
-        let gd = tempfile::TempDir::new().unwrap();
-        let a1 = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
-        let a2 = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
-        assert_eq!(a1, a2, "same version+mtime must yield the same bust path");
-        assert_eq!(a1, gd.path().join("bust").join("3").join("7"), "path must be <git_dir>/bust/<version>/<config_mtime>");
-        let b = make_bust_dir(gd.path(), BustDir::Reuse { version: 4, config_mtime: 7 });
-        assert_ne!(a1, b, "different version must yield a different bust path");
-        let c = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 8 });
-        assert_ne!(a1, c, "different config_mtime must yield a different bust path");
-    }
-
-    #[test]
-    fn make_bust_dir_fresh_never_collides_with_reuse() {
-        let gd = tempfile::TempDir::new().unwrap();
-        let w = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
-        for _ in 0..5 {
-            let f = make_bust_dir(gd.path(), BustDir::Fresh);
-            assert_ne!(f, w, "fresh bust must not equal a reuse bust path");
-            assert!(
-                f.starts_with(gd.path().join("bust").join("disable")),
-                "fresh bust must live under bust/disable, got {f:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn bust_for_version_zero_degrades_to_fresh() {
-        assert_eq!(bust_for_version(0, 7), BustDir::Fresh);
-        assert_eq!(bust_for_version(3, 0), BustDir::Reuse { version: 3, config_mtime: 0 });
-        assert_eq!(bust_for_version(3, 7), BustDir::Reuse { version: 3, config_mtime: 7 });
-    }
-
-}
+} // mod tests
 
 #[cfg(all(test, not(fork_starship)))]
 mod stock_cache_tests {
@@ -673,5 +639,44 @@ mod stock_cache_tests {
         assert_ne!(r, "SEEDED", "stale time bucket must miss the cache");
         let (_, e) = lru.pop_entry(&key).unwrap();
         assert_eq!(e.time_bucket, crate::cache::current_minute(), "bucket must refresh");
+    }
+}
+
+#[cfg(test)]
+mod bust_dir_tests {
+    use super::{BustDir, bust_for_version, make_bust_dir};
+
+    #[test]
+    fn make_bust_dir_is_version_keyed() {
+        let gd = tempfile::TempDir::new().unwrap();
+        let a1 = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
+        let a2 = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
+        assert_eq!(a1, a2, "same version+mtime must yield the same bust path");
+        assert_eq!(a1, gd.path().join("bust").join("3").join("7"), "path must be <git_dir>/bust/<version>/<config_mtime>");
+        let b = make_bust_dir(gd.path(), BustDir::Reuse { version: 4, config_mtime: 7 });
+        assert_ne!(a1, b, "different version must yield a different bust path");
+        let c = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 8 });
+        assert_ne!(a1, c, "different config_mtime must yield a different bust path");
+    }
+
+    #[test]
+    fn make_bust_dir_fresh_never_collides_with_reuse() {
+        let gd = tempfile::TempDir::new().unwrap();
+        let w = make_bust_dir(gd.path(), BustDir::Reuse { version: 3, config_mtime: 7 });
+        for _ in 0..5 {
+            let f = make_bust_dir(gd.path(), BustDir::Fresh);
+            assert_ne!(f, w, "fresh bust must not equal a reuse bust path");
+            assert!(
+                f.starts_with(gd.path().join("bust").join("disable")),
+                "fresh bust must live under bust/disable, got {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bust_for_version_zero_degrades_to_fresh() {
+        assert_eq!(bust_for_version(0, 7), BustDir::Fresh);
+        assert_eq!(bust_for_version(3, 0), BustDir::Reuse { version: 3, config_mtime: 0 });
+        assert_eq!(bust_for_version(3, 7), BustDir::Reuse { version: 3, config_mtime: 7 });
     }
 }

@@ -252,6 +252,22 @@ fn check_response(resp: &str) {
         "response should contain a prompt character, got: {resp:?}");
 }
 
+fn expect_disconnect_then_serve<F>(what: &str, write_bad: F)
+where
+    F: FnOnce(&PipeClient),
+{
+    let c = PipeClient::connect(1000).expect("connect");
+    write_bad(&c);
+    let err = c.read_response_timeout(2000);
+    assert!(err.is_none(), "{what} must disconnect (never serve a prompt), got {err:?}");
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let c2 = PipeClient::connect(1000).expect("reconnect after disconnect");
+    assert!(c2.send_request(".", &props_empty()));
+    let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
+    check_response(&resp);
+}
+
 #[test]
 fn ipc_reconnect() {
     with_daemon(|| {
@@ -796,66 +812,44 @@ fn lru_eviction_rotates_slot_at_capacity() {
 #[test]
 fn ipc_bad_version_disconnects_then_serves() {
     with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect");
-        let mut frame = encode_request(".", 0, None, 0, None, false);
-        frame[0] = 2;
-        assert!(c.write_raw(&frame));
-        // The daemon drops the connection on a bad version: no response.
-        let err = c.read_response_timeout(2000);
-        assert!(err.is_none(), "bad version must disconnect, never serve a prompt, got {err:?}");
-
-        std::thread::sleep(Duration::from_millis(100));
-        let c2 = PipeClient::connect(1000).expect("reconnect after bad version");
-        assert!(c2.send_request(".", &props_empty()));
-        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
-        check_response(&resp);
+        expect_disconnect_then_serve("bad version", |c| {
+            let mut frame = encode_request(".", 0, None, 0, None, false);
+            frame[0] = 2;
+            assert!(c.write_raw(&frame));
+        });
     });
 }
 
 #[test]
 fn ipc_tail_eating_cwd_disconnects_then_serves() {
     with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect");
         // total_len = 17, cwd_len = 13: the cwd consumes the body exactly and
         // the fixed tail (status/keymap_len/width/config_len/disable) has no
         // room left. The daemon must disconnect (not panic) and survive.
-        let mut body = Vec::new();
-        body.extend_from_slice(&13u32.to_le_bytes());
-        body.resize(17, 0);
-        let mut frame = Vec::new();
-        frame.push(PROTO_VERSION);
-        frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        frame.extend_from_slice(&body);
-        assert!(c.write_raw(&frame));
-        let err = c.read_response_timeout(2000);
-        assert!(err.is_none(), "malformed frame must disconnect, never serve a prompt, got {err:?}");
-
-        std::thread::sleep(Duration::from_millis(100));
-        let c2 = PipeClient::connect(1000).expect("reconnect after malformed frame");
-        assert!(c2.send_request(".", &props_empty()));
-        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
-        check_response(&resp);
+        expect_disconnect_then_serve("tail-eating cwd", |c| {
+            let mut body = Vec::new();
+            body.extend_from_slice(&13u32.to_le_bytes());
+            body.resize(17, 0);
+            let mut frame = Vec::new();
+            frame.push(PROTO_VERSION);
+            frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            frame.extend_from_slice(&body);
+            assert!(c.write_raw(&frame));
+        });
     });
 }
 
 #[test]
 fn ipc_total_len_over_cap_disconnects_then_serves() {
     with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect");
         // Declared total_len = MAX_TOTAL_LEN + 1 pushes the frame over the
         // 65536 cap. The header stage (server.rs) must disconnect without
         // reading a body.
-        let mut frame = vec![PROTO_VERSION];
-        frame.extend_from_slice(&(MAX_TOTAL_LEN as u32 + 1).to_le_bytes());
-        assert!(c.write_raw(&frame));
-        let err = c.read_response_timeout(2000);
-        assert!(err.is_none(), "over-cap total_len must disconnect, got {err:?}");
-
-        std::thread::sleep(Duration::from_millis(100));
-        let c2 = PipeClient::connect(1000).expect("reconnect after over-cap total_len");
-        assert!(c2.send_request(".", &props_empty()));
-        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
-        check_response(&resp);
+        expect_disconnect_then_serve("over-cap total_len", |c| {
+            let mut frame = vec![PROTO_VERSION];
+            frame.extend_from_slice(&(MAX_TOTAL_LEN as u32 + 1).to_le_bytes());
+            assert!(c.write_raw(&frame));
+        });
     });
 }
 
@@ -881,34 +875,20 @@ fn ipc_trailing_body_bytes_tolerated() {
 #[test]
 fn ipc_keymap_over_cap_disconnects_then_serves() {
     with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect");
-        let frame = encode_request(".", 0, Some(&"k".repeat(MAX_KEYMAP_LEN + 1)), 0, None, false);
-        assert!(c.write_raw(&frame));
-        let err = c.read_response_timeout(2000);
-        assert!(err.is_none(), "keymap over MAX_KEYMAP_LEN must disconnect, got {err:?}");
-
-        std::thread::sleep(Duration::from_millis(100));
-        let c2 = PipeClient::connect(1000).expect("reconnect after over-cap keymap");
-        assert!(c2.send_request(".", &props_empty()));
-        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
-        check_response(&resp);
+        expect_disconnect_then_serve("keymap over MAX_KEYMAP_LEN", |c| {
+            let frame = encode_request(".", 0, Some(&"k".repeat(MAX_KEYMAP_LEN + 1)), 0, None, false);
+            assert!(c.write_raw(&frame));
+        });
     });
 }
 
 #[test]
 fn ipc_config_over_cap_disconnects_then_serves() {
     with_daemon(|| {
-        let c = PipeClient::connect(1000).expect("connect");
-        let frame = encode_request(".", 0, None, 0, Some(&"c".repeat(MAX_CONFIG_LEN + 1)), false);
-        assert!(c.write_raw(&frame));
-        let err = c.read_response_timeout(2000);
-        assert!(err.is_none(), "config over MAX_CONFIG_LEN must disconnect, got {err:?}");
-
-        std::thread::sleep(Duration::from_millis(100));
-        let c2 = PipeClient::connect(1000).expect("reconnect after over-cap config");
-        assert!(c2.send_request(".", &props_empty()));
-        let resp = c2.read_response_timeout(2000).expect("valid request served after disconnect");
-        check_response(&resp);
+        expect_disconnect_then_serve("config over MAX_CONFIG_LEN", |c| {
+            let frame = encode_request(".", 0, None, 0, Some(&"c".repeat(MAX_CONFIG_LEN + 1)), false);
+            assert!(c.write_raw(&frame));
+        });
     });
 }
 

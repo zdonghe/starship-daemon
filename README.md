@@ -52,13 +52,14 @@ The daemon auto-detects at build time (via `build.rs`) which starship it's compi
 
 200 samples after 15 warmup rounds, measured from PowerShell client across three directories:
 a non-git desktop folder, the [starship](https://github.com/starship/starship) repo, and the [Linux kernel](https://github.com/torvalds/linux) repo.
+Reproduce with `benches/bench-all.ps1`; absolute numbers vary run-to-run (C-state/wake noise), ratios are stable.
 
 | Config | Desktop (non-git) | starship repo (git) | Linux kernel (git) |
 |--------|-------------------|---------------------|--------------------|
-| `starship prompt` subprocess | 23.01 ms | 178.51 ms | 700.04 ms |
-| IPC + stock (no cache) | 0.76 ms | 50.61 ms | 506.20 ms |
-| IPC + gix-native (no cache) | 0.70 ms | 19.73 ms | 508.38 ms |
-| IPC + gix-native + daemon cache | **0.20 ms** | **0.14 ms** | **0.21 ms** |
+| `starship prompt` subprocess | 32.04 ms | 208.42 ms | 745.90 ms |
+| IPC + stock (no cache) | 1.13 ms | 61.94 ms | 510.34 ms |
+| IPC + gix-native (no cache) | 0.97 ms | 13.53 ms | 412.96 ms |
+| IPC + gix-native + daemon cache | **0.20 ms** | **0.17 ms** | **0.12 ms** |
 
 
 ## Caching
@@ -71,7 +72,7 @@ Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 
 In a stock build, starship exposes no segment API, so the whole rendered prompt is cached instead. If the daemon is built with my fork, then segment level caching will be used.
 
-There is segment level caching for the following modules: time, character, status, all. This means that if any of those modules become invalid/outdated, that specific module can be recomputed without needing to recompute the entire prompt.
+There is segment level caching for every module **except** `time`, `character`, `status`, and the `all` placeholder (those re-render live on every prompt). If any other module becomes invalid/outdated, that specific module can be recomputed without needing to recompute the entire prompt.
 
 ## Benchmarking
 

@@ -27,17 +27,17 @@
 
     Run this from a dedicated pwsh session: it loads/removes the module, which replaces the
     session's global:prompt, and it restores env vars + cwd afterwards but not the module.
-    Requires PowerShell 7+ (Start-Process -Environment).
+    Requires PowerShell 7.4+ (Start-Process -Environment).
 #>
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-if ($PSVersionTable.PSVersion.Major -lt 7) {
-    throw "bench-all.ps1 requires PowerShell 7+ (Start-Process -Environment)"
+if ($PSVersionTable.PSVersion -lt [version]'7.4') {
+    throw "bench-all.ps1 requires PowerShell 7.4+ (Start-Process -Environment)"
 }
 
 $origEnv = @{}
-foreach ($n in 'STARSHIP_DAEMON_PIPE','STARSHIP_DAEMON_PATH','STARSHIP_DAEMON_CACHE','STARSHIP_DAEMON_PATH_GIX','STARSHIP_CONFIG','STARSHIP_SHELL','VIRTUAL_ENV_DISABLE_PROMPT')
+foreach ($n in 'STARSHIP_DAEMON_PIPE','STARSHIP_DAEMON_PATH','STARSHIP_DAEMON_CACHE','STARSHIP_CONFIG','STARSHIP_SHELL','VIRTUAL_ENV_DISABLE_PROMPT')
 {
     $origEnv[$n] = [Environment]::GetEnvironmentVariable($n)
 }
@@ -50,7 +50,7 @@ $cfg       = $env:STARSHIP_CONFIG
 $modulePath = "$PSScriptRoot\..\starship-daemon.psm1"
 
 $Warmup = 15; $Samples = 200
-$testStart = Get-Date
+$script:spawned = @()
 $allResults = @()
 
 function Wait-DaemonReady {
@@ -71,36 +71,57 @@ function Wait-DaemonReady {
     return $false
 }
 
-$spawned = @()
-
-function Stop-TestDaemons
-{
-    foreach ($id in $spawned)
-    {
+function Stop-TestDaemons {
+    foreach ($id in $script:spawned) {
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
     }
-    $sweepPaths = @($resolvedDaemon) + @($resolvedDaemonGix | Where-Object { $_ })
-    Get-CimInstance Win32_Process -Filter "Name LIKE 'starship-daemon%'" -ErrorAction SilentlyContinue |
-        Where-Object { $sweepPaths -contains $_.ExecutablePath -and $_.CreationDate -ge $testStart } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $script:spawned = @()
     Start-Sleep -Milliseconds 200
+}
+
+function Measure-Prompt {
+    param(
+        [Parameter(Mandatory)][string]     $Label,
+        [Parameter(Mandatory)][scriptblock]$Action,       # one timed sample; output is null-checked
+        [string]                           $NullMarker,   # value counted as null; empty = use -not $r
+        [scriptblock]                      $PostWarmup  = {},
+        [scriptblock]                      $PostSamples = {}
+    )
+    1..$Warmup | ForEach-Object { & $Action | Out-Null }
+    if ($PostWarmup) { & $PostWarmup }
+    $nulls = 0
+    $sw = [System.Diagnostics.Stopwatch]::new()
+    $times = 1..$Samples | ForEach-Object {
+        $sw.Restart()
+        $r = & $Action
+        $sw.Stop()
+        if ($NullMarker) { if ([string]$r -eq $NullMarker) { $nulls++ } }
+        elseif (-not $r) { $nulls++ }
+        $sw.Elapsed.TotalMilliseconds
+    }
+    if ($PostSamples) { & $PostSamples }
+    $s      = $times | Sort-Object
+    $mean   = ($times | Measure-Object -Average).Average
+    $median = ($s[[int]($s.Count / 2) - 1] + $s[[int]($s.Count / 2)]) / 2
+    $p95    = $s[[int]($s.Count * 0.95)]
+    Write-Host ("  {0,-18} mean={1,7:N2} median={2,7:N2} p95={3,7:N2} max={4,7:N2} nulls={5}" -f $Label, $mean, $median, $p95, $s[-1], $nulls)
+    [PSCustomObject]@{
+        Config = $Label
+        Mean   = "{0:N2}" -f $mean
+        Median = "{0:N2}" -f $median
+        P95    = "{0:N2}" -f $p95
+        Max    = "{0:N2}" -f $s[-1]
+        Nulls  = $nulls
+    }
 }
 
 $configToUse = $cfg
 if ($daemon) {
-    if ($configToUse) {
-        if (-not (Test-Path -LiteralPath $configToUse -PathType Leaf)) {
-            Write-Error "STARSHIP_CONFIG '$configToUse' is not a file - daemon would exit(1) ConfigNotFound"
-        }
-        $configToUse = (Resolve-Path -LiteralPath $configToUse).ProviderPath
-    } else {
-        $defaultConfig = Join-Path $env:USERPROFILE '.config\starship.toml'
-        if (Test-Path -LiteralPath $defaultConfig -PathType Leaf) {
-            $configToUse = $defaultConfig
-        } else {
-            Write-Error "STARSHIP_CONFIG unset and no default at '$defaultConfig' - daemon would exit(1) ConfigNotFound"
-        }
+    if (-not $configToUse) { $configToUse = Join-Path $env:USERPROFILE '.config\starship.toml' }
+    if (-not (Test-Path -LiteralPath $configToUse -PathType Leaf)) {
+        throw "no usable STARSHIP_CONFIG ('$configToUse') - daemon would exit(1) ConfigNotFound"
     }
+    $configToUse = (Resolve-Path -LiteralPath $configToUse).ProviderPath
 }
 
 $resolvedDaemon = $null
@@ -130,125 +151,79 @@ if ($resolvedDaemonGix) {
     $variants += @{ label="gix + cache";    cache=1; exe=$resolvedDaemonGix }
 }
 
+function Invoke-SubprocessBaseline {
+    $exe = (Get-Command starship -CommandType Application -ErrorAction SilentlyContinue).Source
+    if (-not $exe) {
+        Write-Warning "starship not found on PATH; skipping subprocess baseline row"
+        return
+    }
+    Write-Host "=== starship prompt (subprocess baseline) ===" -ForegroundColor Cyan
+
+    if ($configToUse) { $env:STARSHIP_CONFIG = $configToUse }
+    $spArgs = @('prompt', '--path', $targetDir, '--status', '0', '--terminal-width', '120')
+
+    Measure-Prompt -Label 'starship prompt' -Action { & $exe @spArgs 2>$null }
+}
+
+function Invoke-IPCBenchmarks {
+    $rows = @()
+    for ($vi = 0; $vi -lt $variants.Count; $vi++) {
+        $v = $variants[$vi]
+        Write-Host "=== $($v.label) ===" -ForegroundColor Cyan
+
+        $pipeName = "starship-daemon-bench-{0}-{1}" -f $vi, ([guid]::NewGuid().ToString('N').Substring(0, 8))
+
+        $proc = Start-Process -FilePath $v.exe -WindowStyle Hidden -PassThru -Environment @{
+            STARSHIP_DAEMON_PIPE  = $pipeName
+            STARSHIP_CONFIG       = $configToUse
+        }
+        $script:spawned += $proc.Id
+
+        if (-not (Wait-DaemonReady -PipeName $pipeName)) {
+            throw "FAIL: daemon (pid $($proc.Id)) never became ready on pipe $pipeName"
+        }
+
+        $env:STARSHIP_DAEMON_PIPE  = $pipeName
+        $env:STARSHIP_CONFIG       = $configToUse
+        $env:STARSHIP_DAEMON_PATH  = ''
+        $env:STARSHIP_DAEMON_CACHE = "$($v.cache)"
+        Set-Location $targetDir
+
+        Remove-Module starship-daemon -ErrorAction SilentlyContinue
+        $mod = Import-Module $modulePath -DisableNameChecking -Force -PassThru
+
+        if (& $mod { $script:DaemonDown }) {
+            throw "FAIL: latched after import ($($v.label))"
+        }
+
+        $probe = & $mod { Get-StarshipPrompt -ExitCode 0 -Keymap '' -Width 80 }
+        if (-not $probe) {
+            throw "FAIL: Get-StarshipPrompt returned null on first call ($($v.label))"
+        }
+
+        $fallback = "PS $((Get-Location).ProviderPath)> "
+        $checkWarmup  = { if (& $mod { $script:DaemonDown }) { throw "FAIL: latched during warmup ($($v.label))" } }
+        $checkSamples = { if (& $mod { $script:DaemonDown }) { throw "FAIL: daemon-down latch was thrown during samples ($($v.label))" } }
+
+        $rows += Measure-Prompt -Label $v.label `
+            -Action { prompt } `
+            -NullMarker $fallback `
+            -PostWarmup  $checkWarmup `
+            -PostSamples $checkSamples
+
+        Stop-TestDaemons
+    }
+    $rows
+}
+
 try
 {
-    $starshipExe = (Get-Command starship -CommandType Application -ErrorAction SilentlyContinue).Source
-    if (-not $starshipExe) {
-        Write-Warning "starship not found on PATH; skipping subprocess baseline row"
+    $subprocessRow = Invoke-SubprocessBaseline
+    if ($subprocessRow) { $allResults += $subprocessRow }
+
+    if ($variants.Count) {
+        $allResults += Invoke-IPCBenchmarks
     } else {
-        Write-Host "=== starship prompt (subprocess baseline) ===" -ForegroundColor Cyan
-
-        if ($configToUse) { $env:STARSHIP_CONFIG = $configToUse }
-        $starshipArgs = @('prompt', '--path', $targetDir, '--status', '0', '--terminal-width', '120')
-
-        1..$Warmup | ForEach-Object { & $starshipExe @starshipArgs 2>$null | Out-Null }
-
-        $nulls = 0
-        $times = 1..$Samples | ForEach-Object {
-            $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $r = & $starshipExe @starshipArgs 2>$null
-            $sw.Stop()
-            if (-not $r) { $nulls++ }
-            $sw.Elapsed.TotalMilliseconds
-        }
-
-        $s = $times | Sort-Object
-        $med = [int]($s.Count / 2)
-        $median = ($s[$med - 1] + $s[$med]) / 2
-        Write-Host ("  {0,-18} mean={1,7:N2} median={2,7:N2} p95={3,7:N2} max={4,7:N2} nulls={5}" -f 'starship prompt', `
-            ($times | Measure-Object -Average).Average, $median, $s[[int]($s.Count * 0.95)], $s[-1], $nulls)
-        $allResults += [PSCustomObject]@{
-            Config = 'starship prompt'
-            Mean   = "{0:N2}" -f ($times | Measure-Object -Average).Average
-            Median = "{0:N2}" -f $median
-            P95    = "{0:N2}" -f $s[[int]($s.Count * 0.95)]
-            Max    = "{0:N2}" -f $s[-1]
-            Nulls  = $nulls
-        }
-    }
-
-    if ($variants.Count)
-    {
-        for ($vi = 0; $vi -lt $variants.Count; $vi++)
-        {
-            $v = $variants[$vi]
-            Write-Host "=== $($v.label) ===" -ForegroundColor Cyan
-
-            $pipeName = "starship-daemon-bench-{0}-{1}" -f $vi, ([guid]::NewGuid().ToString('N').Substring(0, 8))
-
-            $proc = Start-Process -FilePath $v.exe -WindowStyle Hidden -PassThru -Environment @{
-                STARSHIP_DAEMON_PIPE  = $pipeName
-                STARSHIP_CONFIG       = $configToUse
-            }
-            $spawned += $proc.Id
-
-            if (-not (Wait-DaemonReady -PipeName $pipeName))
-            {
-                throw "FAIL: daemon (pid $($proc.Id)) never became ready on pipe $pipeName"
-            }
-
-            $env:STARSHIP_DAEMON_PIPE  = $pipeName
-            $env:STARSHIP_CONFIG       = $configToUse
-            $env:STARSHIP_DAEMON_PATH  = ''
-            $env:STARSHIP_DAEMON_CACHE = "$($v.cache)"
-            Set-Location $targetDir
-
-            Remove-Module starship-daemon -ErrorAction SilentlyContinue
-            $mod = Import-Module $modulePath -DisableNameChecking -Force -PassThru
-
-            if (& $mod { $script:DaemonDown })
-            {
-                throw "FAIL: latched after import ($($v.label))"
-            }
-
-            $probe = & $mod { Get-StarshipPrompt -ExitCode 0 -Keymap '' -Width 80 }
-            if (-not $probe)
-            {
-                throw "FAIL: Get-StarshipPrompt returned null on first call ($($v.label))"
-            }
-
-            1..$Warmup | ForEach-Object { prompt | Out-Null }
-
-            if (& $mod { $script:DaemonDown })
-            {
-                throw "FAIL: latched during warmup ($($v.label))"
-            }
-
-            $fallback = "PS $((Get-Location).ProviderPath)> "
-            $nulls = 0
-            $times = 1..$Samples | ForEach-Object {
-                $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $r = prompt
-                $sw.Stop()
-                if ([string]$r -eq $fallback) { $nulls++ }
-                $sw.Elapsed.TotalMilliseconds
-            }
-
-            if (& $mod { $script:DaemonDown })
-            {
-                throw "FAIL: daemon-down latch was thrown during samples ($($v.label))"
-            }
-
-            $s = $times | Sort-Object
-            $med = [int]($s.Count / 2)
-            $median = ($s[$med - 1] + $s[$med]) / 2
-            Write-Host ("  {0,-18} mean={1,7:N2} median={2,7:N2} p95={3,7:N2} max={4,7:N2} nulls={5}" -f $v.label, `
-                ($times | Measure-Object -Average).Average, $median, $s[[int]($s.Count * 0.95)], $s[-1], $nulls)
-            $allResults += [PSCustomObject]@{
-                Config = $v.label
-                Mean   = "{0:N2}" -f ($times | Measure-Object -Average).Average
-                Median = "{0:N2}" -f $median
-                P95    = "{0:N2}" -f $s[[int]($s.Count * 0.95)]
-                Max    = "{0:N2}" -f $s[-1]
-                Nulls  = $nulls
-            }
-
-            Stop-TestDaemons
-            $spawned = @()
-        }
-    }
-    else
-    {
         Write-Warning "no resolvable daemon (STARSHIP_DAEMON_PATH/_GIX); skipping IPC benchmarks"
     }
 }

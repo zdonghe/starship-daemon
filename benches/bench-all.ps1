@@ -20,9 +20,21 @@
       STARSHIP_DAEMON_PATH  - path to stock starship-daemon.exe (default build, required for IPC)
       STARSHIP_DAEMON_PATH_GIX - path to gix-native daemon (optional, adds gix variants)
       STARSHIP_CONFIG       - path to starship.toml
+
+    IPC rows measure the full module global:prompt (Get-History exit-code, $global:error[0],
+    PSReadLine keymap, terminal-width probe + the pipe round-trip). The subprocess row measures
+    only cold `starship prompt` process cost - the two are not a strict render-speed comparison.
+
+    Run this from a dedicated pwsh session: it loads/removes the module, which replaces the
+    session's global:prompt, and it restores env vars + cwd afterwards but not the module.
+    Requires PowerShell 7+ (Start-Process -Environment).
 #>
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "bench-all.ps1 requires PowerShell 7+ (Start-Process -Environment)"
+}
 
 $origEnv = @{}
 foreach ($n in 'STARSHIP_DAEMON_PIPE','STARSHIP_DAEMON_PATH','STARSHIP_DAEMON_CACHE','STARSHIP_DAEMON_PATH_GIX','STARSHIP_CONFIG','STARSHIP_SHELL','VIRTUAL_ENV_DISABLE_PROMPT')
@@ -59,15 +71,6 @@ function Wait-DaemonReady {
     return $false
 }
 
-$variants = @(
-    @{ label="stock (no-cache)"; cache=0; exe=$daemon },
-    @{ label="stock + cache";    cache=1; exe=$daemon }
-)
-if ($daemonGix) {
-    $variants += @{ label="gix (no-cache)"; cache=0; exe=$daemonGix }
-    $variants += @{ label="gix + cache";    cache=1; exe=$daemonGix }
-}
-
 $spawned = @()
 
 function Stop-TestDaemons
@@ -84,33 +87,47 @@ function Stop-TestDaemons
 }
 
 $configToUse = $cfg
-if ($configToUse) {
-    if (-not (Test-Path -LiteralPath $configToUse -PathType Leaf)) {
-        Write-Error "STARSHIP_CONFIG '$configToUse' is not a file - daemon would exit(1) ConfigNotFound"
-        exit 1
-    }
-} else {
-    $defaultConfig = Join-Path $env:USERPROFILE '.config\starship.toml'
-    if (Test-Path -LiteralPath $defaultConfig -PathType Leaf) {
-        $configToUse = $defaultConfig
+if ($daemon) {
+    if ($configToUse) {
+        if (-not (Test-Path -LiteralPath $configToUse -PathType Leaf)) {
+            Write-Error "STARSHIP_CONFIG '$configToUse' is not a file - daemon would exit(1) ConfigNotFound"
+        }
+        $configToUse = (Resolve-Path -LiteralPath $configToUse).ProviderPath
     } else {
-        Write-Error "STARSHIP_CONFIG unset and no default at '$defaultConfig' - daemon would exit(1) ConfigNotFound"
-        exit 1
+        $defaultConfig = Join-Path $env:USERPROFILE '.config\starship.toml'
+        if (Test-Path -LiteralPath $defaultConfig -PathType Leaf) {
+            $configToUse = $defaultConfig
+        } else {
+            Write-Error "STARSHIP_CONFIG unset and no default at '$defaultConfig' - daemon would exit(1) ConfigNotFound"
+        }
     }
 }
 
-if ($daemon)
-{
-    try
-    {
-        $resolvedDaemon = (Resolve-Path $daemon).ProviderPath
-        $resolvedDaemonGix = if ($daemonGix) { (Resolve-Path $daemonGix).ProviderPath } else { $null }
-    }
-    catch
-    {
+$resolvedDaemon = $null
+$resolvedDaemonGix = $null
+if ($daemon) {
+    if (Test-Path -LiteralPath $daemon -PathType Leaf) {
+        $resolvedDaemon = (Resolve-Path -LiteralPath $daemon).ProviderPath
+    } else {
         Write-Warning "Could not resolve STARSHIP_DAEMON_PATH '$daemon'; skipping IPC benchmarks"
-        $daemon = $null
     }
+    if ($daemonGix) {
+        if (Test-Path -LiteralPath $daemonGix -PathType Leaf) {
+            $resolvedDaemonGix = (Resolve-Path -LiteralPath $daemonGix).ProviderPath
+        } else {
+            Write-Warning "Could not resolve STARSHIP_DAEMON_PATH_GIX '$daemonGix'; skipping gix variants"
+        }
+    }
+}
+
+$variants = @()
+if ($resolvedDaemon) {
+    $variants += @{ label="stock (no-cache)"; cache=0; exe=$resolvedDaemon }
+    $variants += @{ label="stock + cache";    cache=1; exe=$resolvedDaemon }
+}
+if ($resolvedDaemonGix) {
+    $variants += @{ label="gix (no-cache)"; cache=0; exe=$resolvedDaemonGix }
+    $variants += @{ label="gix + cache";    cache=1; exe=$resolvedDaemonGix }
 }
 
 try
@@ -121,7 +138,7 @@ try
     } else {
         Write-Host "=== starship prompt (subprocess baseline) ===" -ForegroundColor Cyan
 
-        $env:STARSHIP_CONFIG = $configToUse
+        if ($configToUse) { $env:STARSHIP_CONFIG = $configToUse }
         $starshipArgs = @('prompt', '--path', $targetDir, '--status', '0', '--terminal-width', '120')
 
         1..$Warmup | ForEach-Object { & $starshipExe @starshipArgs 2>$null | Out-Null }
@@ -150,7 +167,7 @@ try
         }
     }
 
-    if ($daemon)
+    if ($variants.Count)
     {
         for ($vi = 0; $vi -lt $variants.Count; $vi++)
         {
@@ -161,7 +178,6 @@ try
 
             $proc = Start-Process -FilePath $v.exe -WindowStyle Hidden -PassThru -Environment @{
                 STARSHIP_DAEMON_PIPE  = $pipeName
-                STARSHIP_DAEMON_CACHE = "$($v.cache)"
                 STARSHIP_CONFIG       = $configToUse
             }
             $spawned += $proc.Id
@@ -204,7 +220,7 @@ try
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 $r = prompt
                 $sw.Stop()
-                if ($r -eq $fallback) { $nulls++ }
+                if ([string]$r -eq $fallback) { $nulls++ }
                 $sw.Elapsed.TotalMilliseconds
             }
 
@@ -228,11 +244,12 @@ try
             }
 
             Stop-TestDaemons
+            $spawned = @()
         }
     }
     else
     {
-        Write-Warning "STARSHIP_DAEMON_PATH not set; skipping IPC benchmarks"
+        Write-Warning "no resolvable daemon (STARSHIP_DAEMON_PATH/_GIX); skipping IPC benchmarks"
     }
 }
 finally

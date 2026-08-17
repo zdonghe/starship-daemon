@@ -1,6 +1,6 @@
 param([int]$N = 150, [int]$Warm = 30, [int]$IdleMs = 3000, [int]$BudgetSeconds = 0, [string]$Tag = "all", [string]$AModule = "", [string]$BModule = "", [string]$AOut = "", [string]$BOut = "", [string]$Worker = "module_ab_worker.ps1")
 $ErrorActionPreference = "Stop"
-$repo = (Split-Path $PSScriptRoot -Parent)
+$repo = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 $daemonExe = "$repo\target\release\starship-daemon.exe"
 $base = "$PSScriptRoot\ab"
 $worker = "$PSScriptRoot\$Worker"

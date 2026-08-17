@@ -1,6 +1,6 @@
 param([int]$BudgetSeconds = 8, [int]$WarmSamples = 40, [string]$WarmOut = "")
 $ErrorActionPreference = "Stop"
-$repo = (Split-Path $PSScriptRoot -Parent)
+$repo = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 Set-Location $repo
 function QPC-Us { [double][System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1e6 }
 

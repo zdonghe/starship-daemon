@@ -8,7 +8,7 @@ param(
     [int]$N = 150
 )
 $ErrorActionPreference = "Stop"
-$repo = (Split-Path $PSScriptRoot -Parent)
+$repo = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 function QPC-Us { [double][System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1e6 }
 
 Remove-Item Env:STARSHIP_DAEMON_PIPE -ErrorAction SilentlyContinue
@@ -17,10 +17,11 @@ Remove-Item Env:STARSHIP_DAEMON_CACHE -ErrorAction SilentlyContinue
 $env:STARSHIP_DAEMON_PATH = "$repo\target\release\starship-daemon.exe"
 $env:STARSHIP_DAEMON_PIPE = $DaemonPipe
 
+Import-Module PSReadLine -ErrorAction SilentlyContinue
 Import-Module $ModulePath -Force
-$mod = Get-Module starship-daemon
+
 for ($i = 0; $i -lt $Warm; $i++) {
-    $null = & $mod { param($ec, $km, $wd) Get-StarshipPrompt -ExitCode $ec -Keymap $km -Width $wd } 0 "emacs" 120
+    $null = global:prompt
 }
 
 $srv = [System.IO.Pipes.NamedPipeServerStream]::new($CtrlPipe, [System.IO.Pipes.PipeDirection]::InOut)
@@ -36,15 +37,12 @@ for ($i = 0; $i -lt $N; $i++) {
     if ($cmd -eq "quit") { break }
     if ($cmd -ne "go") { continue }
     $t0 = QPC-Us
-    $r = & $mod { param($ec, $km, $wd) Get-StarshipPrompt -ExitCode $ec -Keymap $km -Width $wd } 0 "emacs" 120
+    $r = global:prompt
     $t1 = QPC-Us
-    if ($null -eq $r) { throw "module returned null" }
+    if (-not $r) { throw "global:prompt returned empty" }
     $samples.Add(("{0:F3}" -f ($t1 - $t0)))
-    try { $wtr.WriteLine("done") } catch { }
+    $wtr.WriteLine("done")
 }
-try { $rdr.Dispose() } catch { }
-try { $wtr.Dispose() } catch { }
-try { $srv.Dispose() } catch { }
 
-Remove-Module starship-daemon
 $samples | Set-Content -LiteralPath $OutFile
+$rdr.Dispose(); $wtr.Dispose(); $srv.Dispose()

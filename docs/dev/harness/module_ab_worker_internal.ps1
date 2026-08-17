@@ -8,7 +8,7 @@ param(
     [int]$N = 150
 )
 $ErrorActionPreference = "Stop"
-$repo = (Split-Path $PSScriptRoot -Parent)
+$repo = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 
 Remove-Item Env:STARSHIP_DAEMON_PIPE -ErrorAction SilentlyContinue
 Remove-Item Env:STARSHIP_DAEMON_THROTTLE -ErrorAction SilentlyContinue
@@ -22,7 +22,6 @@ for ($i = 0; $i -lt $Warm; $i++) {
     $null = & $mod { param($ec, $km, $wd) Get-StarshipPrompt -ExitCode $ec -Keymap $km -Width $wd } 0 "emacs" 120
 }
 
-$env:STARSHIP_DAEMON_PIPE = $DaemonPipe
 $srv = [System.IO.Pipes.NamedPipeServerStream]::new($CtrlPipe, [System.IO.Pipes.PipeDirection]::InOut)
 Set-Content -LiteralPath $ReadyFile -Value "ready"
 $srv.WaitForConnection()
@@ -37,7 +36,7 @@ for ($i = 0; $i -lt $N; $i++) {
     if ($cmd -ne "go") { continue }
     $r = & $mod { param($ec, $km, $wd) Get-StarshipPrompt -ExitCode $ec -Keymap $km -Width $wd } 0 "emacs" 120
     if ($null -eq $r) { throw "module returned null" }
-    $lu = & $mod { [double]$script:LastReadUs }
+    $lu = & $mod { [double]$script:LastLogicUs }
     $samples.Add(("{0:F3}" -f $lu))
     try { $wtr.WriteLine("done") } catch { }
 }

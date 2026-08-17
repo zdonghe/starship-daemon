@@ -1,6 +1,6 @@
 param([int]$N = 150, [int]$Warm = 30, [int]$IdleMs = 3000)
 $ErrorActionPreference = "Stop"
-$repo = (Split-Path $PSScriptRoot -Parent)
+$repo = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 Set-Location $repo
 $daemonExe = "$repo\target\release\starship-daemon.exe"
 function QPC-Us { [double][System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency * 1e6 }

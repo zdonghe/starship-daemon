@@ -4,12 +4,15 @@ $script:DaemonPipe = $null
 $script:RespBuf = $null
 $script:DaemonDown = $false
 
-$script:DaemonPipeName = if ($env:STARSHIP_DAEMON_PIPE) { $env:STARSHIP_DAEMON_PIPE } else { "starship-daemon" }
+$script:DaemonPipeName = if ($env:STARSHIP_DAEMON_PIPE) {
+    $env:STARSHIP_DAEMON_PIPE
+} else {
+    "starship-daemon"
+}
 $script:LastBuildKey = $null
 $script:LastBuildBuf = $null
-if (-not (Test-Path function:Invoke-Starship-PreCommand))
-{
-    function global:Invoke-Starship-PreCommand { }
+if (-not (Test-Path function:Invoke-Starship-PreCommand)) {
+    function global:Invoke-Starship-PreCommand {}
 }
 
 $script:FrameSrc = @"
@@ -49,46 +52,62 @@ public static class StarshipFrame {
 "@
 $frameHash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:FrameSrc))).Replace('-', '')
 $frameAsm = Join-Path $PSScriptRoot "StarshipFrame-$frameHash.dll"
-if (Test-Path -LiteralPath $frameAsm)
-{
-    Add-Type -Path $frameAsm
-} else
-{
-    Add-Type -TypeDefinition $script:FrameSrc -OutputAssembly $frameAsm
-    Add-Type -Path $frameAsm
-}
-
-function Start-StarshipDaemon
-{
-    $script:DaemonDown = $false
-    if ([string]::IsNullOrEmpty($script:DaemonPath))
-    { return }
-    $procName = [System.IO.Path]::GetFileNameWithoutExtension($script:DaemonPath)
-    if ((Get-Process -Name $procName -ErrorAction SilentlyContinue).Count -eq 0)
-    {
-        $null = Start-Process -FilePath $script:DaemonPath -WindowStyle Hidden
+try {
+    if (Test-Path -LiteralPath $frameAsm) {
+        Add-Type -Path $frameAsm
+    } else {
+        Add-Type -TypeDefinition $script:FrameSrc -OutputAssembly $frameAsm
+        Add-Type -Path $frameAsm
+    }
+} catch {
+    Remove-Item -LiteralPath $frameAsm -Force -ErrorAction SilentlyContinue
+    if ($null -eq ('StarshipFrame' -as [type])) {
+        Add-Type -TypeDefinition $script:FrameSrc
     }
 }
 
-function Get-StarshipPrompt
-{
+function Start-StarshipDaemon {
+    # are we sure? this does not guarantee that the daemon is no longer down
+    $script:DaemonDown = $false
+    if ([string]::IsNullOrEmpty($script:DaemonPath)) {
+        return
+    }
+    $procName = [System.IO.Path]::GetFileNameWithoutExtension($script:DaemonPath)
+    $mutex = $null
+    try {
+        $mutex = [System.Threading.Mutex]::new($false, "Local\starship-daemon-launch")
+        try {
+            $null = $mutex.WaitOne()
+        } catch {}
+        if ((Get-Process -Name $procName -ErrorAction SilentlyContinue).Count -eq 0) {
+            $null = Start-Process -FilePath $script:DaemonPath -WindowStyle Hidden
+        }
+    } finally {
+        if ($null -ne $mutex) {
+            try {
+                $mutex.ReleaseMutex()
+            } catch {}
+            $mutex.Dispose()
+        }
+    }
+}
+
+function Get-StarshipPrompt {
     param([int]$ExitCode, [string]$Keymap, [int]$Width)
 
-    if ($script:DaemonDown)
-    { return $null }
+    if ($script:DaemonDown) {
+        return $null
+    }
 
     $pipe = $script:DaemonPipe
-    if ($null -eq $pipe)
-    {
-        $pipe = try
-        {
+    if ($null -eq $pipe) {
+        $pipe = try {
             $pipeName = $script:DaemonPipeName
             $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
             $p.Connect(10)
             $p.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
             $p
-        } catch
-        {
+        } catch {
             $script:DaemonDown = $true
             return $null
         }
@@ -99,24 +118,26 @@ function Get-StarshipPrompt
 
     $failed = $false
     $result = $null
-    try
-    {
+    try {
         $currentCfg = $env:STARSHIP_CONFIG
         $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
-        $config = if ($cfgChanged) { $currentCfg } else { $null }
+        $config = if ($cfgChanged) {
+            $currentCfg
+        } else {
+            $null
+        }
         $disableCache = 0
-        if ($env:STARSHIP_DAEMON_CACHE -eq "0")
-        { $disableCache = 1 }
+        if ($env:STARSHIP_DAEMON_CACHE -eq "0") {
+            $disableCache = 1
+        }
 
         $buildKey = "$cwd|$ExitCode|$Keymap|$Width|$config|$disableCache"
-        if ($buildKey -ne $script:LastBuildKey)
-        {
+        if ($buildKey -ne $script:LastBuildKey) {
             $script:LastBuildKey = $buildKey
             $script:LastBuildBuf = [StarshipFrame]::Build($cwd, $ExitCode, $Keymap, $Width, $config, [byte]$disableCache)
         }
         $buf = $script:LastBuildBuf
-        if ($null -eq $buf)
-        {
+        if ($null -eq $buf) {
             return $null
         }
 
@@ -124,100 +145,105 @@ function Get-StarshipPrompt
         $pipe.Flush()
 
         $respBuf = $script:RespBuf
-        if ($null -eq $respBuf)
-        {
+        if ($null -eq $respBuf) {
             $respBuf = [byte[]]::new(65536)
             $script:RespBuf = $respBuf
         }
         $read = $pipe.Read($respBuf, 0, $respBuf.Length)
         $result = [StarshipFrame]::Parse($respBuf, $read)
-        if ($null -eq $result)
-        {
+        if ($null -eq $result) {
             $failed = $true
         }
-    } catch
-    {
+    } catch {
         $failed = $true
     }
 
-    if ($failed)
-    {
+    if ($failed) {
         $pipe.Dispose()
         $script:DaemonPipe = $null
         $script:DaemonDown = $true
         return $null
     }
 
-    if ($cfgChanged)
-    {
+    if ($cfgChanged) {
         $script:LastStarshipConfig = $currentCfg
     }
     return $result
 }
 
-function Disconnect-StarshipDaemon
-{
-    if ($null -ne $script:DaemonPipe)
-    {
+function Disconnect-StarshipDaemon {
+    if ($null -ne $script:DaemonPipe) {
         $script:DaemonPipe.Dispose()
         $script:DaemonPipe = $null
     }
 }
 
-function Stop-StarshipDaemon
-{
+function Stop-StarshipDaemon {
     Disconnect-StarshipDaemon
-    if ([string]::IsNullOrEmpty($script:DaemonPath))
-    { return }
+    if ([string]::IsNullOrEmpty($script:DaemonPath)) {
+        return
+    }
     $procName = [System.IO.Path]::GetFileNameWithoutExtension($script:DaemonPath)
     Get-Process -Name $procName -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
+    $script:DaemonDown = $false
+}
+
+function Restart-StarshipDaemon {
+    Stop-StarshipDaemon
+    Start-StarshipDaemon
 }
 
 $MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = { Disconnect-StarshipDaemon }
 
 $env:VIRTUAL_ENV_DISABLE_PROMPT = 1
-$env:STARSHIP_SHELL = if ($PSVersionTable.PSVersion.Major -gt 5) { "pwsh" } else { "powershell" }
+$env:STARSHIP_SHELL = if ($PSVersionTable.PSVersion.Major -gt 5) {
+    "pwsh"
+} else {
+    "powershell"
+}
 
 Start-StarshipDaemon
 
-try
-{
+try {
     Set-PSReadLineOption -ContinuationPrompt "· "
-}
-catch { }
+} catch {}
 
-function global:prompt
-{
+function global:prompt {
     $origDollarQuestion = $global:?
     $origLastExitCode = $global:LASTEXITCODE
 
-    try
-    {
+    try {
         Invoke-Starship-PreCommand
-    } catch { }
+    } catch {}
 
     $exitCode = 0
-    if (-not $origDollarQuestion)
-    {
-        if ($lastCmd = Get-History -Count 1)
-        {
-            $lastCmdletError = try { $global:error[0].InvocationInfo } catch { $null }
-            if ($null -ne $lastCmdletError -and $lastCmd.CommandLine -eq $lastCmdletError.Line) { $exitCode = 1 } else { $exitCode = $origLastExitCode }
+    if (-not $origDollarQuestion) {
+        if ($lastCmd = Get-History -Count 1) {
+            $lastCmdletError = try {
+                $global:error[0].InvocationInfo
+            } catch {
+                $null
+            }
+            if ($null -ne $lastCmdletError -and $lastCmd.CommandLine -eq $lastCmdletError.Line) {
+                $exitCode = 1
+            } else {
+                $exitCode = $origLastExitCode
+            }
         }
     }
 
     $result = $null
-    try
-    {
-        $keymap = if ([Microsoft.PowerShell.PSConsoleReadLine]::InViCommandMode()) { "vi" } else { "emacs" }
+    try {
+        $keymap = if ([Microsoft.PowerShell.PSConsoleReadLine]::InViCommandMode()) {
+            "vi"
+        } else {
+            "emacs"
+        }
         $result = Get-StarshipPrompt -ExitCode $exitCode -Keymap $keymap -Width $Host.UI.RawUI.WindowSize.Width
-    } catch
-    {
-    }
+    } catch {}
 
-    if (-not $result)
-    {
+    if (-not $result) {
         $loc = $executionContext.SessionState.Path.CurrentLocation
         $result = "PS $($loc.ProviderPath)> "
     }
@@ -226,16 +252,13 @@ function global:prompt
 
     $global:LASTEXITCODE = $origLastExitCode
 
-    if ($global:? -ne $origDollarQuestion)
-    {
-        if ($origDollarQuestion)
-        {
-            1+1
-        } else
-        {
+    if ($global:? -ne $origDollarQuestion) {
+        if ($origDollarQuestion) {
+            1 + 1
+        } else {
             Write-Error '' -ErrorAction 'Ignore'
         }
     }
 }
 
-Export-ModuleMember -Function global:prompt, Start-StarshipDaemon
+Export-ModuleMember -Function global:prompt, Start-StarshipDaemon, Stop-StarshipDaemon, Restart-StarshipDaemon

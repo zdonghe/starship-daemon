@@ -67,7 +67,6 @@ try {
 }
 
 function Start-StarshipDaemon {
-    # are we sure? this does not guarantee that the daemon is no longer down
     $script:DaemonDown = $false
     if ([string]::IsNullOrEmpty($script:DaemonPath)) {
         return
@@ -136,13 +135,12 @@ function Get-StarshipPrompt {
             $script:LastBuildKey = $buildKey
             $script:LastBuildBuf = [StarshipFrame]::Build($cwd, $ExitCode, $Keymap, $Width, $config, [byte]$disableCache)
         }
-        $buf = $script:LastBuildBuf
-        if ($null -eq $buf) {
+        $request = $script:LastBuildBuf
+        if ($null -eq $request) {
             return $null
         }
 
-        $pipe.Write($buf, 0, $buf.Length)
-        $pipe.Flush()
+        $pipe.Write($request, 0, $request.Length)
 
         $respBuf = $script:RespBuf
         if ($null -eq $respBuf) {

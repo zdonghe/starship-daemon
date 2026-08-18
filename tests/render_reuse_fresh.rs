@@ -1,4 +1,4 @@
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 mod fresh_test {
     use std::time::Duration;
 
@@ -58,7 +58,7 @@ mod fresh_test {
     }
 }
 
-#[cfg(not(fork_starship))]
+#[cfg(not(feature = "fork"))]
 mod non_fork_compile_guard {
     #[allow(dead_code)]
     fn _assert_path_is_path(_p: &std::path::Path) {}

@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(d.lru.len(), 0, "disable_cache must bypass the render cache");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     fn git_cmd(repo: &std::path::Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .arg("-C").arg(repo)
@@ -249,7 +249,7 @@ mod tests {
         assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     fn wait_for_bump(w: &mut WatcherState, repo: &std::path::Path, before: u64) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -260,7 +260,7 @@ mod tests {
         }
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn watcher_through_handle_invalidates_cache() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -290,7 +290,7 @@ mod tests {
         assert!(d.lru.len() > cached, "watcher version change must bust the cache key");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     fn status_cfg(dir: &tempfile::TempDir) -> PathBuf {
         let p = dir.path().join("starship.toml");
         std::fs::write(&p, "\
@@ -301,7 +301,7 @@ format = \"$conflicted$stashed$deleted$renamed$modified$staged$untracked\"\n").u
         p
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     fn std_config(dir: &tempfile::TempDir) -> PathBuf {
         let p = dir.path().join("starship.toml");
         std::fs::write(&p, "\
@@ -312,7 +312,7 @@ format = \"$modified$untracked\"\n").unwrap();
         p
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     fn wait_status(d: &mut DaemonState, repo: &std::path::Path, req: &[u8], before: &str) -> String {
         let before_ver = d.watcher.version(repo);
         wait_for_bump(&mut d.watcher, repo, before_ver);
@@ -321,7 +321,7 @@ format = \"$modified$untracked\"\n").unwrap();
         out
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn tracked_worktree_edit_updates_status_in_real_time() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -350,7 +350,7 @@ format = \"$modified$untracked\"\n").unwrap();
         assert!(!out_restored.contains('!'), "restore must clear modified, got {out_restored:?}");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn untracked_create_updates_status_in_real_time() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -374,7 +374,7 @@ format = \"$modified$untracked\"\n").unwrap();
         assert!(out.contains('?'), "untracked file must show ? in real time, got {out:?}");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn stash_creation_updates_status_in_real_time() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -400,7 +400,7 @@ format = \"$modified$untracked\"\n").unwrap();
         assert!(t.contains('$'), "stash must show $ symbol in real time, got {t:?}");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn no_change_reuses_cache_no_bump() {
         let dir = tempfile::TempDir::new().unwrap();

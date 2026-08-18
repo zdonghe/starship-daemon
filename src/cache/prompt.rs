@@ -1,17 +1,17 @@
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 use starship::configs::PROMPT_ORDER;
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 use starship::formatter::StringFormatter;
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 use starship::formatter::VariableHolder;
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 use starship::print::{get_prompt_with_cache, ModuleCache};
 
 use crate::cache::{get_mtime_ns, CacheKey};
@@ -25,7 +25,7 @@ pub struct RenderContext {
 
 pub struct CachedValue {
     pub rendered: String,
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     pub segments: ModuleCache,
     pub time_bucket: u64,
     pub status_code: i32,
@@ -117,7 +117,7 @@ pub fn render_prompt_with_config(ctx: &RenderContext, git_dir: Option<&Path>, co
     trim_prompt(&result)
 }
 
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 fn expand_all(context: &starship::context::Context) -> String {
     let format_str = &context.root_config.format;
 
@@ -142,7 +142,7 @@ fn expand_all(context: &starship::context::Context) -> String {
     format_str.replace("${all}", &replacement).replace("$all", &replacement)
 }
 
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 fn populate_cache(
     context: &starship::context::Context,
     format_str: &str,
@@ -181,7 +181,7 @@ fn prepare_ctx(
     sctx.set_config(config.clone())
 }
 
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 fn resolve_format(sctx: &starship::context::Context) -> String {
     if sctx.root_config.format.contains('$') {
         expand_all(sctx)
@@ -196,7 +196,7 @@ fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
     *rc = Some(RepoCache { git_dir: gd.to_path_buf(), index_mtime, ctx: Some(sctx) });
 }
 
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 fn prepare_and_resolve(
     resolved_gd: Option<&Path>,
     current_dir: &Path,
@@ -212,7 +212,7 @@ fn trim_prompt(s: &str) -> String {
     s.trim_end_matches('\n').to_string()
 }
 
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 pub fn render_cached(
     ctx: &RenderContext,
     git_dir: Option<&Path>,
@@ -263,7 +263,7 @@ pub fn render_cached(
     rendered
 }
 
-#[cfg(not(fork_starship))]
+#[cfg(not(feature = "fork"))]
 pub fn render_cached(
     ctx: &RenderContext,
     git_dir: Option<&Path>,
@@ -286,15 +286,15 @@ pub fn render_cached(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     use std::num::NonZeroUsize;
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     use super::*;
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     use crate::cache::compute_cache_key;
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     fn test_ctx(cwd: &Path) -> starship::context::Context<'static> {
         let mut p = starship::context::Properties::default();
         p.status_code = Some("0".to_string());
@@ -313,7 +313,7 @@ mod tests {
         ctx
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn expand_all_no_all_in_format() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -322,7 +322,7 @@ mod tests {
         assert_eq!(fmt, "$character");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn expand_all_replaces_all_with_explicit() {
         let mut p = starship::context::Properties::default();
@@ -346,7 +346,7 @@ mod tests {
         assert!(!fmt.contains("$all"), "expanded format does not contain $all");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn expand_all_skips_disabled_modules() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -362,7 +362,7 @@ mod tests {
         assert!(!fmt.contains("$character"), "disabled module excluded from expansion");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn expand_all_with_right_format_exclusions() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -379,7 +379,7 @@ mod tests {
             "right_format modules must be excluded from $all expansion");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn render_cached_matches_render_prompt_with_config() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(got3, expected, "time-only re-render should match full render");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn time_only_re_render_refreshes_bucket() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(cached.time_bucket, tb, "time_bucket must be updated");
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn multiple_stale_bucket_rereads_preserve_cache() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -499,7 +499,7 @@ mod tests {
         }
     }
 
-    #[cfg(fork_starship)]
+    #[cfg(feature = "fork")]
     #[test]
     fn render_cached_status_code_isolation() {
 
@@ -569,7 +569,7 @@ mod tests {
 
 } // mod tests
 
-#[cfg(all(test, not(fork_starship)))]
+#[cfg(all(test, not(feature = "fork")))]
 mod stock_cache_tests {
     use std::num::NonZeroUsize;
 

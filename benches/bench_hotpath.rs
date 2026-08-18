@@ -20,7 +20,10 @@ fn render_cold(cwd: &PathBuf, config: &Table) -> String {
 fn main() {
     let cwd = std::env::current_dir().unwrap();
     let config_path = cache::default_config_path();
-    let config_path = cache::load_config(&config_path).unwrap();
+    let Some(config_path) = cache::load_config(&config_path) else {
+        eprintln!("starship config not found; skipping bench");
+        return;
+    };
     let config = cache::read_config(&config_path);
 
     println!("=== starship-daemon hot-path benchmarks ===\n");
@@ -37,8 +40,8 @@ fn main() {
     let key = cache::compute_cache_key(&cwd, "viins", 120, 0, 0);
     let cached = CachedValue {
         rendered: "dummy".to_string(),
-        #[cfg(fork_starship)]
-        segments: starship::print::ModuleCache::new(),
+        #[cfg(feature = "fork")]
+        segments: starship_fork::print::ModuleCache::new(),
         time_bucket: cache::current_minute(),
         status_code: 0,
     };

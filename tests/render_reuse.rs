@@ -1,4 +1,4 @@
-#[cfg(fork_starship)]
+#[cfg(feature = "fork")]
 mod reuse_test {
     use std::sync::Mutex;
 
@@ -107,7 +107,7 @@ mod reuse_test {
     }
 }
 
-#[cfg(not(fork_starship))]
+#[cfg(not(feature = "fork"))]
 mod non_fork_compile_guard {
     #[allow(dead_code)]
     fn _assert_path_is_path(_p: &std::path::Path) {}

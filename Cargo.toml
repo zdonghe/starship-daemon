@@ -2,13 +2,32 @@
 name = "starship-daemon"
 version = "0.1.0"
 edition = "2024"
+description = "Persistent starship prompt daemon over a Windows named pipe"
+repository = "https://github.com/zdonghe/starship-daemon"
+license = "MIT"
+readme = "README.md"
+keywords = ["starship", "prompt", "named-pipe", "shell"]
+categories = ["command-line-utilities"]
+rust-version = "1.90"
 
 [lib]
 name = "starship_daemon"
 path = "src/lib.rs"
 
+[features]
+default = ["stock"]
+# The `stock` and `fork` variants are mutually exclusive. `stock` links the
+# crates.io starship and uses its whole-prompt cache path. `fork` builds against
+# the personal starship fork (github.com/zdonghe/starship, pinned by revision
+# below), which adds a segment-level cache API
+# (starship::print::get_prompt_with_cache). Build the fork variant with
+# `cargo build --no-default-features --features fork`.
+stock = ["dep:starship"]
+fork = ["dep:starship-fork"]
+
 [dependencies]
-starship = { version = "1", default-features = false }
+starship = { version = "1", default-features = false, optional = true }
+starship-fork = { package = "starship", git = "https://github.com/zdonghe/starship", rev = "00aea6cadcc5d2e7ebd9fad45cea49f75eedc16d", default-features = false, optional = true }
 toml = "1"
 lru = "0.12"
 
@@ -31,13 +50,9 @@ harness = false
 name = "bench_gitignore"
 harness = false
 
-[patch.crates-io]
-starship = { git = "https://github.com/zdonghe/starship", branch = "main" }
-
 [profile.release]
 lto = "fat"
 codegen-units = 1
 opt-level = "z"
 panic = "abort"
 strip = true
-

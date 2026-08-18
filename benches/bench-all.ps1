@@ -9,7 +9,7 @@
     Env vars:
       STARSHIP_BENCH_DIR    - directory to test (default: this script's directory)
       STARSHIP_DAEMON_PATH  - path to stock starship-daemon.exe (default build, required for IPC)
-      STARSHIP_DAEMON_PATH_GIX - path to gix-native daemon (optional, adds gix variants)
+      STARSHIP_DAEMON_PATH_FORK - path to fork-native daemon (optional, adds fork variants)
       STARSHIP_CONFIG       - path to starship.toml
 
     Run this from a dedicated pwsh session: it loads/removes the module, which replaces the
@@ -44,7 +44,7 @@ $targetDir = if ($env:STARSHIP_BENCH_DIR) {
     $PSScriptRoot
 }
 $daemon = $env:STARSHIP_DAEMON_PATH
-$daemonGix = $env:STARSHIP_DAEMON_PATH_GIX
+$daemonFork = $env:STARSHIP_DAEMON_PATH_FORK
 $cfg = $env:STARSHIP_CONFIG
 $modulePath = "$PSScriptRoot\..\starship-daemon.psm1"
 
@@ -134,7 +134,7 @@ function Measure-Prompt {
 # ---------------------------------------------------------------------------
 
 $configToUse = $cfg
-if ($daemon -or $daemonGix) {
+if ($daemon -or $daemonFork) {
     if (-not $configToUse) {
         $configToUse = Join-Path $env:USERPROFILE '.config\starship.toml'
     }
@@ -145,7 +145,7 @@ if ($daemon -or $daemonGix) {
 }
 
 $resolvedDaemon = $null
-$resolvedDaemonGix = $null
+$resolvedDaemonFork = $null
 if ($daemon) {
     if (Test-Path -LiteralPath $daemon -PathType Leaf) {
         $resolvedDaemon = (Resolve-Path -LiteralPath $daemon).ProviderPath
@@ -153,11 +153,11 @@ if ($daemon) {
         Write-Warning "Could not resolve STARSHIP_DAEMON_PATH '$daemon'; skipping IPC benchmarks"
     }
 }
-if ($daemonGix) {
-    if (Test-Path -LiteralPath $daemonGix -PathType Leaf) {
-        $resolvedDaemonGix = (Resolve-Path -LiteralPath $daemonGix).ProviderPath
+if ($daemonFork) {
+    if (Test-Path -LiteralPath $daemonFork -PathType Leaf) {
+        $resolvedDaemonFork = (Resolve-Path -LiteralPath $daemonFork).ProviderPath
     } else {
-        Write-Warning "Could not resolve STARSHIP_DAEMON_PATH_GIX '$daemonGix'; skipping gix variants"
+        Write-Warning "Could not resolve STARSHIP_DAEMON_PATH_FORK '$daemonFork'; skipping fork variants"
     }
 }
 
@@ -166,9 +166,9 @@ if ($resolvedDaemon) {
     $variants += @{ label = "stock (no-cache)"; cache = 0; exe = $resolvedDaemon }
     $variants += @{ label = "stock + cache";    cache = 1; exe = $resolvedDaemon }
 }
-if ($resolvedDaemonGix) {
-    $variants += @{ label = "gix (no-cache)"; cache = 0; exe = $resolvedDaemonGix }
-    $variants += @{ label = "gix + cache";    cache = 1; exe = $resolvedDaemonGix }
+if ($resolvedDaemonFork) {
+    $variants += @{ label = "fork (no-cache)"; cache = 0; exe = $resolvedDaemonFork }
+    $variants += @{ label = "fork + cache";    cache = 1; exe = $resolvedDaemonFork }
 }
 
 # ---------------------------------------------------------------------------
@@ -261,7 +261,7 @@ try {
     if ($variants.Count) {
         $allResults += Invoke-IPCBenchmarks
     } else {
-        Write-Warning "no resolvable daemon (STARSHIP_DAEMON_PATH/_GIX); skipping IPC benchmarks"
+        Write-Warning "no resolvable daemon (STARSHIP_DAEMON_PATH/_FORK); skipping IPC benchmarks"
     }
 } finally {
     Stop-TestDaemons

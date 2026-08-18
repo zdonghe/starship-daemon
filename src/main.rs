@@ -11,7 +11,8 @@ use starship_daemon::watch::{STATS_ENABLED, drain_stats};
 
 fn main() {
     if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
-        println!("starship-daemon {}", env!("CARGO_PKG_VERSION"));
+        let variant = if cfg!(feature = "fork") { "fork" } else { "stock" };
+        println!("starship-daemon {} ({variant})", env!("CARGO_PKG_VERSION"));
         return;
     }
 

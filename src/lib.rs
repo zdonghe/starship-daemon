@@ -4,9 +4,6 @@ use std::sync::Mutex;
 
 use lru::LruCache;
 
-// The `stock` and `fork` variants are mutually exclusive (see Cargo.toml).
-// `stock` links the crates.io starship; `fork` links the personal starship fork,
-// which adds the segment-level cache API (starship::print::get_prompt_with_cache).
 #[cfg(feature = "fork")]
 extern crate starship_fork as starship;
 

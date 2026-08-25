@@ -7,7 +7,7 @@ use std::time::Instant;
 use starship_daemon::daemon::DaemonState;
 use starship_daemon::ffi::{self, DWORD, HANDLE, LPCVOID, LPVOID};
 use starship_daemon::watch::MAX_WATCHED_REPOS;
-use starship_daemon::{HEADER_LEN, MAX_FRAME_LEN, MAX_TOTAL_LEN, PROTO_VERSION};
+use starship_daemon::{HEADER_LEN, MAX_FRAME_LEN, MAX_TOTAL_LEN};
 
 const PIPE_ACCESS_DUPLEX: DWORD = 3;
 const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
@@ -316,7 +316,7 @@ fn advance_stages(s: &mut Session, state: &mut DaemonState, served: &mut u32) ->
 fn advance_one_stage(s: &mut Session, state: &mut DaemonState, served: &mut u32) -> bool {
     match s.stage {
         ReadStage::Header => {
-            if s.buf[0] != PROTO_VERSION {
+            if !starship_daemon::valid_request_type(s.buf[0]) {
                 disconnect_session(s, DisconnectReason::Malformed);
                 return false;
             }

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use starship_daemon::{
-    HEADER_LEN, MAX_CONFIG_LEN, MAX_KEYMAP_LEN, MAX_TOTAL_LEN, PROTO_VERSION, ffi,
+    HEADER_LEN, MAX_CONFIG_LEN, MAX_KEYMAP_LEN, MAX_TOTAL_LEN, PROTO_VERSION, REQ_TIMINGS, ffi,
 };
 
 const PIPE_PATH: &str = r"\\.\pipe\starship-daemon";
@@ -1010,14 +1010,78 @@ fn lru_eviction_rotates_slot_at_capacity() {
 }
 
 #[test]
-fn ipc_bad_version_disconnects_then_serves() {
+fn ipc_bad_type_disconnects_then_serves() {
     with_daemon(|| {
-        expect_disconnect_then_serve("bad version", |c| {
+        expect_disconnect_then_serve("bad request type", |c| {
             let mut frame = encode_request(".", 0, None, 0, None, false);
-            frame[0] = 2;
+            frame[0] = 0xFF;
             assert!(c.write_raw(&frame));
         });
     });
+}
+
+#[test]
+fn ipc_timings_served_then_session_reusable() {
+    with_daemon(|| {
+        let Some(c) = PipeClient::connect(10_000) else {
+            panic!("connect failed");
+        };
+        let mut frame = encode_request(".", 0, None, 120, None, false);
+        frame[0] = REQ_TIMINGS;
+        assert!(c.write_raw(&frame));
+        let resp = c
+            .read_response_timeout(60_000)
+            .expect("timings response must arrive");
+        assert!(
+            resp.contains("Here are the timings of modules in your prompt"),
+            "report must contain module table header, got: {resp}"
+        );
+        assert!(
+            resp.contains("Render path timing"),
+            "report must contain render-path section, got: {resp}"
+        );
+
+        assert!(c.send_request(".", &props_empty()));
+        let served = c
+            .read_response_timeout(30_000)
+            .expect("prompt after timings");
+        assert!(
+            !served.is_empty() && (served.contains('$') || served.contains('>')),
+            "same session must still serve a prompt after a timings report, got: {served}"
+        );
+    });
+}
+
+#[test]
+fn ipc_timings_git_repo_reports_git_modules() {
+    let repo = common::TestRepo::new();
+    let repo_path = repo.path().to_str().unwrap().to_string();
+    with_daemon_config(
+        "format = \"$git_branch$git_status\"\nadd_newline = false\n",
+        || {
+            let Some(c) = PipeClient::connect(10_000) else {
+                panic!("connect failed");
+            };
+            let mut frame = encode_request(&repo_path, 0, None, 120, None, false);
+            frame[0] = REQ_TIMINGS;
+            assert!(c.write_raw(&frame));
+            let resp = c
+                .read_response_timeout(60_000)
+                .expect("timings response must arrive");
+            assert!(
+                resp.contains("Render path timing"),
+                "report must contain render-path section, got: {resp}"
+            );
+            assert!(
+                resp.contains("git_branch"),
+                "git repo report must contain a git_branch row, got: {resp}"
+            );
+            assert!(
+                resp.contains("cache: HIT") || resp.contains("cache: MISS"),
+                "report must contain a cache line, got: {resp}"
+            );
+        },
+    );
 }
 
 #[test]

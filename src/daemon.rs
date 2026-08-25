@@ -65,10 +65,16 @@ impl DaemonState {
     }
 
     pub fn handle(&mut self, frame: &[u8]) -> Result<String, DaemonError> {
-        let ParsedRequest { cwd, props } = match crate::parse_request(frame) {
+        let req = match crate::parse_request(frame) {
             Some(r) => r,
             None => return Err(DaemonError::BadFrame),
         };
+
+        if req.kind == crate::RequestKind::Timings {
+            return Ok(crate::timings::build_report(self, &req));
+        }
+
+        let ParsedRequest { cwd, props, .. } = req;
 
         let cwd = if cwd.as_os_str().is_empty() {
             PathBuf::from(".")
@@ -90,7 +96,7 @@ impl DaemonState {
         Ok(output)
     }
 
-    fn sync_config(&mut self, requested: Option<&str>) -> u64 {
+    pub(crate) fn sync_config(&mut self, requested: Option<&str>) -> u64 {
         if let Some(req) = requested {
             let p = Path::new(req);
             if p != self.config_path.as_path()
@@ -111,7 +117,7 @@ impl DaemonState {
         mtime
     }
 
-    fn render_prompt(
+    pub(crate) fn render_prompt(
         &mut self,
         ctx: &RenderContext,
         git_dir: Option<&Path>,

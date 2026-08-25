@@ -36,6 +36,7 @@ pub mod daemon;
 pub mod ffi;
 pub mod gitignore;
 pub mod render;
+pub mod timings;
 pub mod watch;
 
 fn find_git_dir_uncached(cwd: &Path) -> Option<PathBuf> {
@@ -80,24 +81,39 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
 
 // Binary wire protocol.
 //
-// REQUEST  [u8 version=1][u32 LE total_len][body]     max frame 65536 = MAX_FRAME_LEN
+// REQUEST  [u8 request type][u32 LE total_len][body]  max frame 65536 = MAX_FRAME_LEN
+//          type 1 = prompt (REQ_PROMPT), type 2 = timings report (REQ_TIMINGS);
+//          both share the same body layout, only the response differs:
+//          type 1 answers with the prompt, type 2 with a timings report.
 // body     [u32 cwd_len][cwd lossy cap 32768]
 //          [i32 status][u16 keymap_len][keymap lossy cap 256, empty -> None]
 //          [u32 width][u16 config_len][config lossy cap 4096, empty -> None]
 //          [u8 disable cache, non-zero -> true]
-// RESPONSE [u32 LE len][prompt utf8]                  len = prompt.len()
+// RESPONSE [u32 LE len][utf8 payload]                 len = payload.len()
 //
 // The header is 5 bytes and the frame is capped at 65536, so total_len must
-// satisfy 5 + total_len <= 65536, i.e. total_len <= 65531. A bad version, an
-// over-cap field, or a field reading past the body returns None; the daemon
-// then drops the connection and the client falls back to its plain prompt.
+// satisfy 5 + total_len <= 65536, i.e. total_len <= 65531. An unknown request
+// type, an over-cap field, or a field reading past the body returns None; the
+// daemon then drops the connection and the client falls back to its plain prompt.
 pub const PROTO_VERSION: u8 = 1;
+pub const REQ_PROMPT: u8 = PROTO_VERSION;
+pub const REQ_TIMINGS: u8 = 2;
 pub const HEADER_LEN: usize = 5;
 pub const MAX_FRAME_LEN: usize = 65536;
 pub const MAX_TOTAL_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 pub const MAX_CWD_LEN: usize = 32768;
 pub const MAX_KEYMAP_LEN: usize = 256;
 pub const MAX_CONFIG_LEN: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestKind {
+    Prompt,
+    Timings,
+}
+
+pub fn valid_request_type(b: u8) -> bool {
+    b == REQ_PROMPT || b == REQ_TIMINGS
+}
 
 pub struct ClientProps {
     pub status_code: i32,
@@ -108,6 +124,7 @@ pub struct ClientProps {
 }
 
 pub struct ParsedRequest {
+    pub kind: RequestKind,
     pub cwd: PathBuf,
     pub props: ClientProps,
 }
@@ -116,9 +133,13 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
     if data.len() < HEADER_LEN {
         return None;
     }
-    if data[0] != PROTO_VERSION {
+    let kind = if data[0] == REQ_PROMPT {
+        RequestKind::Prompt
+    } else if data[0] == REQ_TIMINGS {
+        RequestKind::Timings
+    } else {
         return None;
-    }
+    };
     let total_len = u32::from_le_bytes(data[1..HEADER_LEN].try_into().unwrap()) as usize;
     if total_len > MAX_TOTAL_LEN {
         return None;
@@ -163,6 +184,7 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
     let disable = read_slice(body, &mut off, 1)?[0];
 
     Some(ParsedRequest {
+        kind,
         cwd,
         props: ClientProps {
             status_code,
@@ -315,10 +337,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_bad_version() {
+    fn parse_request_bad_type() {
         let mut data = encode_request_v1(".", 0, None, 0, None, false);
-        data[0] = 2;
+        data[0] = 0xFF;
         assert!(parse_request(&data).is_none());
+        let mut data = encode_request_v1(".", 0, None, 0, None, false);
+        data[0] = 0;
+        assert!(parse_request(&data).is_none());
+    }
+
+    #[test]
+    fn parse_request_timings_type() {
+        let mut data = encode_request_v1("/repo", 7, Some("vi"), 120, None, false);
+        data[0] = REQ_TIMINGS;
+        let r = parse_request(&data);
+        assert!(r.is_some());
+        let req = r.unwrap();
+        assert_eq!(req.kind, RequestKind::Timings);
+        assert_eq!(req.cwd, PathBuf::from("/repo"));
+        assert_eq!(decode(&req), (7, Some("vi".to_string()), 120, None, false));
     }
 
     #[test]

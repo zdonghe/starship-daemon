@@ -21,14 +21,14 @@ using System.Text;
 public static class StarshipFrame {
     static void W32(byte[] b, int o, uint v) { b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); b[o + 2] = (byte)(v >> 16); b[o + 3] = (byte)(v >> 24); }
     static void W16(byte[] b, int o, ushort v) { b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); }
-    public static byte[] Build(string cwd, int exitCode, string keymap, int width, string config, byte disableCache) {
+    public static byte[] Build(string cwd, int exitCode, string keymap, int width, string config, byte disableCache, byte kind = 1) {
         byte[] cb = Encoding.UTF8.GetBytes(cwd);
         if (cb.Length > 32768) return null;
         byte[] kb = keymap == null ? new byte[0] : Encoding.UTF8.GetBytes(keymap);
         byte[] cf = config == null ? new byte[0] : Encoding.UTF8.GetBytes(config);
         int bl = 17 + cb.Length + kb.Length + cf.Length;
         byte[] buf = new byte[5 + bl];
-        buf[0] = 1;
+        buf[0] = kind;
         W32(buf, 1, (uint)bl);
         int o = 5;
         W32(buf, o, (uint)cb.Length); o += 4;
@@ -149,9 +149,6 @@ function Get-StarshipPrompt {
         }
         $read = $pipe.Read($respBuf, 0, $respBuf.Length)
         $result = [StarshipFrame]::Parse($respBuf, $read)
-        if ($null -eq $result) {
-            $failed = $true
-        }
     } catch {
         $failed = $true
     }
@@ -167,6 +164,95 @@ function Get-StarshipPrompt {
         $script:LastStarshipConfig = $currentCfg
     }
     return $result
+}
+
+function Get-StarshipDaemonTimings {
+    <#
+    .SYNOPSIS
+    Requests a timings report from the running starship-daemon.
+    .DESCRIPTION
+    Sends a type-2 request over the module's existing daemon pipe and returns
+    the report as a string (render-path rows plus per-module timings of the
+    resolved format). Measures uncached cold/warm renders and the cached hit
+    path; the report briefly blocks the daemon, so other terminals' prompts
+    queue behind it.
+    .PARAMETER Cwd
+    Directory to profile. Defaults to the current location.
+    .PARAMETER ExitCode
+    Simulated last exit code for the report. Default 0.
+    .PARAMETER Keymap
+    Simulated keymap for the report. Default 'emacs'.
+    .EXAMPLE
+    Get-StarshipDaemonTimings
+    .EXAMPLE
+    Get-StarshipDaemonTimings -Cwd C:\repos\demo -ExitCode 1 -Keymap vi
+    #>
+    param(
+        [string]$Cwd = $PWD.ProviderPath,
+        [int]$ExitCode = 0,
+        [string]$Keymap = "emacs"
+    )
+
+    $pipe = $script:DaemonPipe
+    if ($null -eq $pipe) {
+        $pipe = try {
+            $pipeName = $script:DaemonPipeName
+            $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
+            try {
+                $p.Connect(2000)
+                $p.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
+                $p
+            } catch {
+                $p.Dispose()
+                throw
+            }
+        } catch {
+            throw "starship-daemon is not reachable on pipe '$pipeName'. Start it with Start-StarshipDaemon."
+        }
+        $script:DaemonPipe = $pipe
+    }
+
+    $ioFailed = $false
+    try {
+        if ([string]::IsNullOrEmpty($Cwd)) {
+            $Cwd = $PWD.ProviderPath
+        }
+        $width = 120
+        try {
+            $width = $Host.UI.RawUI.WindowSize.Width
+        } catch {}
+        $config = $env:STARSHIP_CONFIG
+
+        $request = [StarshipFrame]::Build($Cwd, $ExitCode, $Keymap, $width, $config, [byte]0, [byte]2)
+        if ($null -eq $request) {
+            throw "failed to encode timings request"
+        }
+
+        $respBuf = $script:RespBuf
+        if ($null -eq $respBuf) {
+            $respBuf = [byte[]]::new(65536)
+            $script:RespBuf = $respBuf
+        }
+        $ioFailed = $true
+        $pipe.Write($request, 0, $request.Length)
+        $task = $pipe.ReadAsync($respBuf, 0, $respBuf.Length)
+        if (-not $task.Wait(15000)) {
+            throw "timings read timed out after 15s"
+        }
+        $read = $task.Result
+        $ioFailed = $false
+        $result = [StarshipFrame]::Parse($respBuf, $read)
+        if ($null -eq $result) {
+            throw "invalid timings response from daemon"
+        }
+        return $result
+    } catch {
+        if ($ioFailed) {
+            $pipe.Dispose()
+            $script:DaemonPipe = $null
+        }
+        throw
+    }
 }
 
 function Disconnect-StarshipDaemon {
@@ -259,4 +345,4 @@ function global:prompt {
     }
 }
 
-Export-ModuleMember -Function global:prompt, Start-StarshipDaemon, Stop-StarshipDaemon, Restart-StarshipDaemon
+Export-ModuleMember -Function global:prompt, Start-StarshipDaemon, Stop-StarshipDaemon, Restart-StarshipDaemon, Get-StarshipDaemonTimings

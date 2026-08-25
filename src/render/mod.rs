@@ -169,7 +169,7 @@ pub fn render_cached(
     render_miss(ctx, git_dir, config, full_key, lru, tb)
 }
 
-fn prepare_ctx(
+pub(crate) fn prepare_ctx(
     git_dir: Option<&Path>,
     current_dir: &Path,
     ctx: &RenderContext,
@@ -184,7 +184,7 @@ fn prepare_ctx(
     sctx.set_config(config.clone())
 }
 
-fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
+pub(crate) fn save_repo_cache(gd: &Path, sctx: starship::context::Context<'static>) {
     let index_mtime = get_mtime_ns(&gd.join("index"));
     let mut rc = lock_repo_cache();
     *rc = Some(RepoCache {

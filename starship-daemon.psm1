@@ -91,22 +91,42 @@ function Start-StarshipDaemon {
     }
 }
 
+function Get-StarshipRespBuf {
+    # Shared by prompt (sync Read) and timings (async ReadAsync). Safe: the runspace serializes
+    # calls, and the timings timeout path disposes the pipe, which aborts its pending read.
+    if ($null -eq $script:RespBuf) {
+        $script:RespBuf = [byte[]]::new(65536)
+    }
+    # Leading comma prevents the pipeline from unrolling byte[] into Object[],
+    # which would make Read() bind to a converted copy instead of this buffer.
+    return ,$script:RespBuf
+}
+
 function Get-StarshipPrompt {
     param([int]$ExitCode, [string]$Keymap, [int]$Width)
 
+    # Permanent latch: an IO failure stops further attempts for this session.
+    # Recover with Start-StarshipDaemon / Restart-StarshipDaemon.
     if ($script:DaemonDown) {
         return $null
     }
 
     $pipe = $script:DaemonPipe
     if ($null -eq $pipe) {
-        $pipe = try {
-            $pipeName = $script:DaemonPipeName
+        $pipeName = $script:DaemonPipeName
+        $p = $null
+        try {
             $p = [System.IO.Pipes.NamedPipeClientStream]::new(".", $pipeName)
-            $p.Connect(10)
+            # 250ms: the daemon may not be up yet at the first prompt after
+            # boot. Long enough to catch it coming up, short enough that a
+            # one-shot miss (daemon truly absent) stays tolerable.
+            $p.Connect(250)
             $p.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
-            $p
+            $pipe = $p
         } catch {
+            if ($null -ne $p) {
+                $p.Dispose()
+            }
             $script:DaemonDown = $true
             return $null
         }
@@ -115,8 +135,10 @@ function Get-StarshipPrompt {
 
     $cwd = $PWD.ProviderPath
 
-    $failed = $false
+    $currentCfg = $null
+    $cfgChanged = $false
     $result = $null
+    $ioFailed = $false
     try {
         $currentCfg = $env:STARSHIP_CONFIG
         $cfgChanged = $currentCfg -ne $script:LastStarshipConfig
@@ -140,24 +162,39 @@ function Get-StarshipPrompt {
             return $null
         }
 
+        # Armed only across actual IO: Build/config errors above must not
+        # kill a healthy pipe. Mirrors Get-StarshipDaemonTimings.
+        $ioFailed = $true
         $pipe.Write($request, 0, $request.Length)
 
-        $respBuf = $script:RespBuf
-        if ($null -eq $respBuf) {
-            $respBuf = [byte[]]::new(65536)
-            $script:RespBuf = $respBuf
+        $respBuf = Get-StarshipRespBuf
+        $task = $pipe.ReadAsync($respBuf, 0, $respBuf.Length)
+        if (-not $task.Wait(5000)) {
+            throw [System.TimeoutException]::new("starship-daemon read timed out")
         }
-        $read = $pipe.Read($respBuf, 0, $respBuf.Length)
+        $read = $task.Result
         $result = [StarshipFrame]::Parse($respBuf, $read)
+        $ioFailed = $false
     } catch {
-        $failed = $true
+        # Never let diagnostics escape this catch: under DebugPreference
+        # Stop/Inquire a Write-Debug throw would skip the dispose+latch below.
+        if ($DebugPreference -notin 'Stop', 'Inquire') {
+            Write-Debug "Get-StarshipPrompt: $_"
+        }
     }
 
-    if ($failed) {
+    if ($ioFailed) {
         $pipe.Dispose()
         $script:DaemonPipe = $null
         $script:DaemonDown = $true
         return $null
+    }
+
+    # Partial/oversized message: framing suspect, but the daemon itself is
+    # healthy - discard the pipe WITHOUT latching so the next prompt retries.
+    if ($null -eq $result -and -not $pipe.IsMessageComplete) {
+        $pipe.Dispose()
+        $script:DaemonPipe = $null
     }
 
     if ($cfgChanged) {
@@ -228,11 +265,7 @@ function Get-StarshipDaemonTimings {
             throw "failed to encode timings request"
         }
 
-        $respBuf = $script:RespBuf
-        if ($null -eq $respBuf) {
-            $respBuf = [byte[]]::new(65536)
-            $script:RespBuf = $respBuf
-        }
+        $respBuf = Get-StarshipRespBuf
         $ioFailed = $true
         $pipe.Write($request, 0, $request.Length)
         $task = $pipe.ReadAsync($respBuf, 0, $respBuf.Length)
@@ -243,6 +276,7 @@ function Get-StarshipDaemonTimings {
         $ioFailed = $false
         $result = [StarshipFrame]::Parse($respBuf, $read)
         if ($null -eq $result) {
+            $ioFailed = $true
             throw "invalid timings response from daemon"
         }
         return $result
@@ -287,7 +321,11 @@ $env:STARSHIP_SHELL = if ($PSVersionTable.PSVersion.Major -gt 5) {
     "powershell"
 }
 
-Start-StarshipDaemon
+# Set STARSHIP_DAEMON_NO_AUTOSTART=1 to import without spawning/checking the
+# daemon (used by the Pester suite for hermetic imports).
+if (-not $env:STARSHIP_DAEMON_NO_AUTOSTART) {
+    Start-StarshipDaemon
+}
 
 try {
     Set-PSReadLineOption -ContinuationPrompt "· "

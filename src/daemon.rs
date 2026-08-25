@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use lru::LruCache;
 
-use crate::cache::{self, CacheKey, CachedValue, RenderContext};
+use crate::cache::{self, CacheKey};
+use crate::render::{
+    BustDir, CachedValue, RenderContext, clear_repo_cache, render_cached, render_prompt_with_config,
+};
 use crate::watch::WatcherState;
 use crate::ParsedRequest;
 
@@ -39,13 +42,13 @@ impl DaemonState {
             keymap: "vi".to_string(),
         };
         let warm_key = cache::compute_cache_key(Path::new("."), "vi", 120, 0, 0);
-        let _ = cache::render_cached(&warm_ctx, None, &self.cached_config, &warm_key, &mut self.lru);
+        let _ = render_cached(&warm_ctx, None, &self.cached_config, &warm_key, &mut self.lru);
     }
 
     pub fn reload_config(&mut self) {
         self.cached_config = cache::read_config(&self.config_path);
         self.lru.clear();
-        cache::clear_repo_cache();
+        clear_repo_cache();
         self.last_cfg_mtime = cache::get_mtime_ns(&self.config_path);
     }
 
@@ -86,7 +89,7 @@ impl DaemonState {
 
     fn render_prompt(&mut self, ctx: &RenderContext, git_dir: Option<&Path>, disable_cache: bool, config_mtime: u64) -> String {
         if disable_cache {
-            return cache::render_prompt_with_config(ctx, git_dir, &self.cached_config, cache::BustDir::Fresh);
+            return render_prompt_with_config(ctx, git_dir, &self.cached_config, BustDir::Fresh);
         }
         let watcher_version = if let Some(repo) = git_dir.and_then(Path::parent) {
             self.watcher.ensure(repo);
@@ -96,7 +99,7 @@ impl DaemonState {
             0
         };
         let key = cache::compute_cache_key(&ctx.cwd, &ctx.keymap, ctx.terminal_width, config_mtime, watcher_version);
-        cache::render_cached(ctx, git_dir, &self.cached_config, &key, &mut self.lru)
+        render_cached(ctx, git_dir, &self.cached_config, &key, &mut self.lru)
     }
 }
 
@@ -240,189 +243,184 @@ mod tests {
     }
 
     #[cfg(feature = "fork")]
-    fn git_cmd(repo: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .arg("-C").arg(repo)
-            .args(args)
-            .output()
-            .expect("git command failed");
-        assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
-    }
+    mod fork_tests {
+        use super::*;
 
-    #[cfg(feature = "fork")]
-    fn wait_for_bump(w: &mut WatcherState, repo: &std::path::Path, before: u64) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            w.poll();
-            if w.version(repo) > before { return; }
-            std::thread::sleep(Duration::from_millis(20));
-            assert!(Instant::now() < deadline, "repo version did not bump within 5s");
+        fn git_cmd(repo: &std::path::Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C").arg(repo)
+                .args(args)
+                .output()
+                .expect("git command failed");
+            assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
         }
-    }
 
-    #[cfg(feature = "fork")]
-    #[test]
-    fn watcher_through_handle_invalidates_cache() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git_cmd(&repo, &["init"]);
-        git_cmd(&repo, &["branch", "-M", "main"]);
-        git_cmd(&repo, &["config", "user.email", "test@test"]);
-        git_cmd(&repo, &["config", "user.name", "test"]);
-        std::fs::write(repo.join("a.txt"), "hello").unwrap();
-        git_cmd(&repo, &["add", "a.txt"]);
-        git_cmd(&repo, &["commit", "-m", "initial"]);
-        git_cmd(&repo, &["branch", "other"]);
-        let cfg = dir.path().join("starship.toml");
-        std::fs::write(&cfg, "format = \"$git_branch\"\nadd_newline = false\n[git_branch]\nformat = \"$branch\"\n").unwrap();
+        fn wait_for_bump(w: &mut WatcherState, repo: &std::path::Path, before: u64) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                w.poll();
+                if w.version(repo) > before { return; }
+                std::thread::sleep(Duration::from_millis(20));
+                assert!(Instant::now() < deadline, "repo version did not bump within 5s");
+            }
+        }
 
-        let mut d = DaemonState::new(cfg).unwrap();
-        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
-        assert_eq!(d.handle(&req).unwrap(), "main");
+        #[test]
+        fn watcher_through_handle_invalidates_cache() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git_cmd(&repo, &["init"]);
+            git_cmd(&repo, &["branch", "-M", "main"]);
+            git_cmd(&repo, &["config", "user.email", "test@test"]);
+            git_cmd(&repo, &["config", "user.name", "test"]);
+            std::fs::write(repo.join("a.txt"), "hello").unwrap();
+            git_cmd(&repo, &["add", "a.txt"]);
+            git_cmd(&repo, &["commit", "-m", "initial"]);
+            git_cmd(&repo, &["branch", "other"]);
+            let cfg = dir.path().join("starship.toml");
+            std::fs::write(&cfg, "format = \"$git_branch\"\nadd_newline = false\n[git_branch]\nformat = \"$branch\"\n").unwrap();
 
-        git_cmd(&repo, &["checkout", "other"]);
-        let before = d.watcher.version(&repo);
-        wait_for_bump(&mut d.watcher, &repo, before);
+            let mut d = DaemonState::new(cfg).unwrap();
+            let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+            assert_eq!(d.handle(&req).unwrap(), "main");
 
-        let cached = d.lru.len();
-        assert_eq!(d.handle(&req).unwrap(), "other");
-        assert!(d.lru.len() > cached, "watcher version change must bust the cache key");
-    }
+            git_cmd(&repo, &["checkout", "other"]);
+            let before = d.watcher.version(&repo);
+            wait_for_bump(&mut d.watcher, &repo, before);
 
-    #[cfg(feature = "fork")]
-    fn status_cfg(dir: &tempfile::TempDir) -> PathBuf {
-        let p = dir.path().join("starship.toml");
-        std::fs::write(&p, "\
-format = \"$git_status\"
-add_newline = false
-[git_status]
-format = \"$conflicted$stashed$deleted$renamed$modified$staged$untracked\"\n").unwrap();
-        p
-    }
+            let cached = d.lru.len();
+            assert_eq!(d.handle(&req).unwrap(), "other");
+            assert!(d.lru.len() > cached, "watcher version change must bust the cache key");
+        }
 
-    #[cfg(feature = "fork")]
-    fn std_config(dir: &tempfile::TempDir) -> PathBuf {
-        let p = dir.path().join("starship.toml");
-        std::fs::write(&p, "\
-format = \"$git_status\"
-add_newline = false
-[git_status]
-format = \"$modified$untracked\"\n").unwrap();
-        p
-    }
+        fn status_cfg(dir: &tempfile::TempDir) -> PathBuf {
+            let p = dir.path().join("starship.toml");
+            std::fs::write(&p, "\
+    format = \"$git_status\"
+    add_newline = false
+    [git_status]
+    format = \"$conflicted$stashed$deleted$renamed$modified$staged$untracked\"\n").unwrap();
+            p
+        }
 
-    #[cfg(feature = "fork")]
-    fn wait_status(d: &mut DaemonState, repo: &std::path::Path, req: &[u8], before: &str) -> String {
-        let before_ver = d.watcher.version(repo);
-        wait_for_bump(&mut d.watcher, repo, before_ver);
-        let out = d.handle(req).unwrap();
-        assert_ne!(out, before, "status must update in real time after repo change");
-        out
-    }
+        fn std_config(dir: &tempfile::TempDir) -> PathBuf {
+            let p = dir.path().join("starship.toml");
+            std::fs::write(&p, "\
+    format = \"$git_status\"
+    add_newline = false
+    [git_status]
+    format = \"$modified$untracked\"\n").unwrap();
+            p
+        }
 
-    #[cfg(feature = "fork")]
-    #[test]
-    fn tracked_worktree_edit_updates_status_in_real_time() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git_cmd(&repo, &["init"]);
-        git_cmd(&repo, &["config", "user.email", "test@test"]);
-        git_cmd(&repo, &["config", "user.name", "test"]);
-        std::fs::write(repo.join("a.txt"), "hello").unwrap();
-        git_cmd(&repo, &["add", "a.txt"]);
-        git_cmd(&repo, &["commit", "-m", "initial"]);
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        let cfg = status_cfg(&dir);
-        let mut d = DaemonState::new(cfg).unwrap();
-        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+        fn wait_status(d: &mut DaemonState, repo: &std::path::Path, req: &[u8], before: &str) -> String {
+            let before_ver = d.watcher.version(repo);
+            wait_for_bump(&mut d.watcher, repo, before_ver);
+            let out = d.handle(req).unwrap();
+            assert_ne!(out, before, "status must update in real time after repo change");
+            out
+        }
 
-        let out_clean = d.handle(&req).unwrap();
-        assert!(!out_clean.contains('!'), "clean tree must show no modifications: {out_clean:?}");
+        #[test]
+        fn tracked_worktree_edit_updates_status_in_real_time() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git_cmd(&repo, &["init"]);
+            git_cmd(&repo, &["config", "user.email", "test@test"]);
+            git_cmd(&repo, &["config", "user.name", "test"]);
+            std::fs::write(repo.join("a.txt"), "hello").unwrap();
+            git_cmd(&repo, &["add", "a.txt"]);
+            git_cmd(&repo, &["commit", "-m", "initial"]);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let cfg = status_cfg(&dir);
+            let mut d = DaemonState::new(cfg).unwrap();
+            let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
 
-        std::fs::write(repo.join("a.txt"), "hello world").unwrap();
-        let out_mod = wait_status(&mut d, &repo, &req, &out_clean);
-        assert!(out_mod.contains('!'), "tracked edit must show modified symbol, got {out_mod:?}");
+            let out_clean = d.handle(&req).unwrap();
+            assert!(!out_clean.contains('!'), "clean tree must show no modifications: {out_clean:?}");
 
-        git_cmd(&repo, &["checkout", "--", "a.txt"]);
-        let out_restored = wait_status(&mut d, &repo, &req, &out_mod);
-        assert!(!out_restored.contains('!'), "restore must clear modified, got {out_restored:?}");
-    }
+            std::fs::write(repo.join("a.txt"), "hello world").unwrap();
+            let out_mod = wait_status(&mut d, &repo, &req, &out_clean);
+            assert!(out_mod.contains('!'), "tracked edit must show modified symbol, got {out_mod:?}");
 
-    #[cfg(feature = "fork")]
-    #[test]
-    fn untracked_create_updates_status_in_real_time() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git_cmd(&repo, &["init"]);
-        git_cmd(&repo, &["config", "user.email", "test@test"]);
-        git_cmd(&repo, &["config", "user.name", "test"]);
-        std::fs::write(repo.join("a.txt"), "hello").unwrap();
-        git_cmd(&repo, &["add", "a.txt"]);
-        git_cmd(&repo, &["commit", "-m", "initial"]);
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        let cfg = status_cfg(&dir);
-        let mut d = DaemonState::new(cfg).unwrap();
-        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
-        let out_clean = d.handle(&req).unwrap();
-        assert!(!out_clean.contains('?'), "clean tree must not show untracked, got {out_clean:?}");
+            git_cmd(&repo, &["checkout", "--", "a.txt"]);
+            let out_restored = wait_status(&mut d, &repo, &req, &out_mod);
+            assert!(!out_restored.contains('!'), "restore must clear modified, got {out_restored:?}");
+        }
 
-        std::fs::write(repo.join("new.txt"), "x").unwrap();
-        let out = wait_status(&mut d, &repo, &req, &out_clean);
-        assert!(out.contains('?'), "untracked file must show ? in real time, got {out:?}");
-    }
+        #[test]
+        fn untracked_create_updates_status_in_real_time() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git_cmd(&repo, &["init"]);
+            git_cmd(&repo, &["config", "user.email", "test@test"]);
+            git_cmd(&repo, &["config", "user.name", "test"]);
+            std::fs::write(repo.join("a.txt"), "hello").unwrap();
+            git_cmd(&repo, &["add", "a.txt"]);
+            git_cmd(&repo, &["commit", "-m", "initial"]);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let cfg = status_cfg(&dir);
+            let mut d = DaemonState::new(cfg).unwrap();
+            let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+            let out_clean = d.handle(&req).unwrap();
+            assert!(!out_clean.contains('?'), "clean tree must not show untracked, got {out_clean:?}");
 
-    #[cfg(feature = "fork")]
-    #[test]
-    fn stash_creation_updates_status_in_real_time() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git_cmd(&repo, &["init"]);
-        git_cmd(&repo, &["config", "user.email", "test@test"]);
-        git_cmd(&repo, &["config", "user.name", "test"]);
-        std::fs::write(repo.join("a.txt"), "hello").unwrap();
-        git_cmd(&repo, &["add", "a.txt"]);
-        git_cmd(&repo, &["commit", "-m", "initial"]);
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        let cfg = status_cfg(&dir);
-        let mut d = DaemonState::new(cfg.clone()).unwrap();
-        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
-        let out_clean = d.handle(&req).unwrap();
-        assert!(!out_clean.contains('$'), "no stash expected, got {out_clean:?}");
+            std::fs::write(repo.join("new.txt"), "x").unwrap();
+            let out = wait_status(&mut d, &repo, &req, &out_clean);
+            assert!(out.contains('?'), "untracked file must show ? in real time, got {out:?}");
+        }
 
-        std::fs::write(repo.join("a.txt"), "dirty").unwrap();
-        git_cmd(&repo, &["stash"]);
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        let t = wait_status(&mut d, &repo, &req, &out_clean);
-        assert!(t.contains('$'), "stash must show $ symbol in real time, got {t:?}");
-    }
+        #[test]
+        fn stash_creation_updates_status_in_real_time() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git_cmd(&repo, &["init"]);
+            git_cmd(&repo, &["config", "user.email", "test@test"]);
+            git_cmd(&repo, &["config", "user.name", "test"]);
+            std::fs::write(repo.join("a.txt"), "hello").unwrap();
+            git_cmd(&repo, &["add", "a.txt"]);
+            git_cmd(&repo, &["commit", "-m", "initial"]);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let cfg = status_cfg(&dir);
+            let mut d = DaemonState::new(cfg.clone()).unwrap();
+            let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+            let out_clean = d.handle(&req).unwrap();
+            assert!(!out_clean.contains('$'), "no stash expected, got {out_clean:?}");
 
-    #[cfg(feature = "fork")]
-    #[test]
-    fn no_change_reuses_cache_no_bump() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git_cmd(&repo, &["init"]);
-        git_cmd(&repo, &["config", "user.email", "test@test"]);
-        git_cmd(&repo, &["config", "user.name", "test"]);
-        std::fs::write(repo.join("a.txt"), "hello").unwrap();
-        git_cmd(&repo, &["add", "a.txt"]);
-        git_cmd(&repo, &["commit", "-m", "initial"]);
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        let cfg = std_config(&dir);
-        let mut d = DaemonState::new(cfg).unwrap();
-        let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
-        let out1 = d.handle(&req).unwrap();
-        let v1 = d.watcher.version(&repo);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let out2 = d.handle(&req).unwrap();
-        let v2 = d.watcher.version(&repo);
-        assert_eq!(out1, out2, "steady state must return identical output");
-        assert_eq!(v1, v2, "no change must not bump watcher version");
+            std::fs::write(repo.join("a.txt"), "dirty").unwrap();
+            git_cmd(&repo, &["stash"]);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let t = wait_status(&mut d, &repo, &req, &out_clean);
+            assert!(t.contains('$'), "stash must show $ symbol in real time, got {t:?}");
+        }
+
+        #[test]
+        fn no_change_reuses_cache_no_bump() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git_cmd(&repo, &["init"]);
+            git_cmd(&repo, &["config", "user.email", "test@test"]);
+            git_cmd(&repo, &["config", "user.name", "test"]);
+            std::fs::write(repo.join("a.txt"), "hello").unwrap();
+            git_cmd(&repo, &["add", "a.txt"]);
+            git_cmd(&repo, &["commit", "-m", "initial"]);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            let cfg = std_config(&dir);
+            let mut d = DaemonState::new(cfg).unwrap();
+            let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
+            let out1 = d.handle(&req).unwrap();
+            let v1 = d.watcher.version(&repo);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let out2 = d.handle(&req).unwrap();
+            let v2 = d.watcher.version(&repo);
+            assert_eq!(out1, out2, "steady state must return identical output");
+            assert_eq!(v1, v2, "no change must not bump watcher version");
+        }
     }
 
     #[test]

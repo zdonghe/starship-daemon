@@ -4,7 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use lru::LruCache;
-use starship_daemon::cache::{self, CacheKey, CachedValue, RenderContext};
+use starship_daemon::cache::{self, CacheKey};
+use starship_daemon::render::{self, CachedValue, RenderContext};
 use starship_daemon::watch::WatcherState;
 
 mod common;
@@ -52,7 +53,7 @@ impl MultiRepoHarness {
             terminal_width: 120, status_code: 0,
             keymap: "vi".to_string(),
         };
-        cache::render_cached(&ctx, gd.as_deref(), &self.config, &key, &mut self.lru)
+        render::render_cached(&ctx, gd.as_deref(), &self.config, &key, &mut self.lru)
     }
 
     fn render_a(&mut self) -> String { let p = self.a.path().to_path_buf(); self.render_repo(&p) }

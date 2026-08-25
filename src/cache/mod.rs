@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
 pub mod config;
-pub mod prompt;
 
 pub use config::*;
-pub use prompt::*;
 
 pub fn get_mtime_ns(p: &Path) -> u64 {
     std::fs::metadata(p)

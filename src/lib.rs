@@ -24,6 +24,7 @@ pub fn pipe_name() -> String {
 pub mod cache;
 pub mod daemon;
 pub mod ffi;
+pub mod render;
 pub mod watch;
 pub mod gitignore;
 

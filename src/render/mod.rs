@@ -285,3 +285,169 @@ mod bust_dir_tests {
         );
     }
 }
+
+/// Differential tests: the daemon's rendered prompt must be byte-identical to
+/// what plain starship produces for the same inputs (cwd, exit code, width,
+/// shell, config table). The reference is computed by building an equivalent
+/// starship Context directly and calling `get_prompt`, bypassing every layer
+/// of daemon machinery (bust dirs, caches, config plumbing).
+#[cfg(test)]
+mod fidelity_tests {
+    use std::num::NonZeroUsize;
+    use std::path::Path;
+
+    use lru::LruCache;
+    use toml::toml;
+
+    use super::{
+        BustDir, RenderContext, clear_repo_cache, render_cached, render_prompt_with_config,
+        trim_prompt,
+    };
+    use crate::cache::{compute_cache_key, current_minute};
+
+    const WIDTH: usize = 120;
+    const KEYMAP: &str = "vi";
+
+    pub(crate) fn default_cfg() -> toml::Table {
+        toml! { add_newline = false }
+    }
+
+    fn rctx(cwd: &Path, status_code: i32) -> RenderContext {
+        RenderContext {
+            cwd: cwd.to_path_buf(),
+            terminal_width: WIDTH,
+            status_code,
+            keymap: KEYMAP.to_string(),
+        }
+    }
+
+    /// What plain starship would print standing in `cwd`: a Context built
+    /// exactly like prepare_ctx does, but with the real cwd as both
+    /// current_dir and logical_dir (no bust-directory indirection).
+    fn ref_ctx(cwd: &Path, status_code: i32) -> starship::context::Context<'static> {
+        let mut p = starship::context::Properties::default();
+        p.status_code = Some(status_code.to_string());
+        p.keymap = KEYMAP.to_string();
+        let mut ctx = starship::context::Context::new_with_shell_and_path(
+            p,
+            starship::context::Shell::Pwsh,
+            starship::context::Target::Main,
+            cwd.to_path_buf(),
+            cwd.to_path_buf(),
+            starship::context::Env::default(),
+        );
+        ctx.width = WIDTH;
+        ctx.set_config(default_cfg())
+    }
+
+    pub(crate) fn reference(cwd: &Path, status_code: i32) -> String {
+        trim_prompt(&starship::print::get_prompt(&ref_ctx(cwd, status_code)))
+    }
+
+    fn daemon_fresh(cwd: &Path, status_code: i32) -> String {
+        clear_repo_cache();
+        render_prompt_with_config(
+            &rctx(cwd, status_code),
+            None,
+            &default_cfg(),
+            BustDir::Fresh,
+        )
+    }
+
+    fn assert_matches_reference(cwd: &Path, status_code: i32) {
+        let want = reference(cwd, status_code);
+        let got = daemon_fresh(cwd, status_code);
+        assert_eq!(got, want, "daemon output diverged from starship reference");
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            // Hermetic against the parent shell: ignore ambient git env and
+            // any global signing/hook configuration.
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git must be available");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    pub(crate) fn repo_with_commit() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("tracked.txt"), "a\n").unwrap();
+        git(dir.path(), &["init"]);
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn plain_directory_matches_starship_reference() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_matches_reference(dir.path(), 0);
+    }
+
+    #[test]
+    fn clean_git_repo_matches_starship_reference() {
+        let dir = repo_with_commit();
+        assert_matches_reference(dir.path(), 0);
+    }
+
+    #[test]
+    fn dirty_git_repo_matches_starship_reference() {
+        let dir = repo_with_commit();
+        std::fs::write(dir.path().join("tracked.txt"), "b\n").unwrap();
+        assert_matches_reference(dir.path(), 0);
+    }
+
+    #[test]
+    fn repo_subdirectory_matches_starship_reference() {
+        let dir = repo_with_commit();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert_matches_reference(&sub, 0);
+    }
+
+    #[test]
+    fn nonzero_status_matches_starship_reference() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_matches_reference(dir.path(), 1);
+    }
+
+    #[test]
+    fn warm_cache_hit_matches_starship_reference() {
+        let dir = repo_with_commit();
+        std::fs::write(dir.path().join("tracked.txt"), "b\n").unwrap();
+        clear_repo_cache();
+
+        let ctx = rctx(dir.path(), 0);
+        let cfg = default_cfg();
+        let key = compute_cache_key(dir.path(), KEYMAP, WIDTH, 0, 0);
+        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
+
+        let first = render_cached(&ctx, None, &cfg, &key, &mut lru);
+        let tb = current_minute();
+        let second = render_cached(&ctx, None, &cfg, &key, &mut lru);
+        let want = reference(dir.path(), 0);
+        assert_eq!(first, want, "miss-path output must equal the reference");
+        assert_eq!(second, want, "cache-hit output must equal the reference");
+        let entry = lru.get(&key).expect("entry must exist after render");
+        assert_eq!(
+            entry.time_bucket, tb,
+            "time bucket untouched by second call - proves the hit branch ran"
+        );
+    }
+}

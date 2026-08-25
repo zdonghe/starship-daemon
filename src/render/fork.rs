@@ -479,4 +479,87 @@ mod tests {
         let r4 = render_cached(&ctx0, Some(gd.path()), &cfg, &key2, &mut lru);
         assert!(r4.contains("C-OK"), "fresh-key render must work, got: {r4}");
     }
+
+    /// The segment-reuse path serves cached module segments for everything
+    /// except the live-rendered modules; its output must still be
+    /// byte-identical to what plain starship computes fresh for the same
+    /// repo state (same watcher_version guarantees the state has not moved).
+    #[test]
+    fn segment_reuse_output_matches_fresh_reference() {
+        use crate::render::fidelity_tests::{default_cfg, reference, repo_with_commit};
+
+        clear_repo_cache();
+        let dir = repo_with_commit();
+        let ctx = RenderContext {
+            cwd: dir.path().to_path_buf(),
+            terminal_width: 120,
+            status_code: 0,
+            keymap: "vi".to_string(),
+        };
+        let cfg = default_cfg();
+        let key = compute_cache_key(dir.path(), "vi", 120, 0, 0);
+
+        let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
+        let _miss = render_cached(&ctx, None, &cfg, &key, &mut lru);
+
+        // Force the reuse path the way a minute rollover does.
+        let (_, mut entry) = lru.pop_entry(&key).unwrap();
+        entry.time_bucket = 0;
+        lru.put(key.clone(), entry);
+
+        let reused = render_cached(&ctx, None, &cfg, &key, &mut lru);
+        let want = reference(dir.path(), 0);
+        assert_eq!(
+            reused, want,
+            "segment-reuse output must equal the starship reference"
+        );
+    }
+
+    /// populate_cache must capture every cacheable module exactly as the
+    /// library would compute it live: rendering through a fully-populated
+    /// ModuleCache must equal rendering with an empty one (all-live).
+    #[test]
+    fn populated_modulecache_renders_identically_to_live() {
+        let cwd = tempfile::TempDir::new().unwrap();
+        let ctx = RenderContext {
+            cwd: cwd.path().to_path_buf(),
+            terminal_width: 120,
+            status_code: 0,
+            keymap: "vi".to_string(),
+        };
+        let cfg = toml! { add_newline = false };
+
+        let (sctx_cached, fmt) = prepare_and_resolve(None, cwd.path(), &ctx, &cfg);
+        let mut segments = ModuleCache::new();
+        populate_cache(&sctx_cached, &fmt, &mut segments);
+        assert!(
+            !segments.is_empty(),
+            "default $all config must produce cached segments"
+        );
+
+        let (sctx_live, fmt_live) = prepare_and_resolve(None, cwd.path(), &ctx, &cfg);
+        let out_cached = trim_prompt(&get_prompt_with_cache(&sctx_cached, &segments, &fmt));
+        let out_live = trim_prompt(&get_prompt_with_cache(
+            &sctx_live,
+            &ModuleCache::new(),
+            &fmt_live,
+        ));
+        assert_eq!(
+            out_cached, out_live,
+            "populated-segment render must equal all-live render"
+        );
+
+        // Consumption proof: blank one cached module. If lookups regressed
+        // to live-render fallback, output would be unchanged (vacuous pass);
+        // with a working cache the directory module vanishes instead.
+        segments
+            .get_mut("directory")
+            .expect("directory must be cached")
+            .clear();
+        let out_poisoned = trim_prompt(&get_prompt_with_cache(&sctx_cached, &segments, &fmt));
+        assert_ne!(
+            out_poisoned, out_live,
+            "blanked cached segment must change output - proves cache is read"
+        );
+    }
 }

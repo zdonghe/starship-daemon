@@ -16,13 +16,16 @@ path = "src/lib.rs"
 
 [features]
 default = ["stock"]
-# The `stock` and `fork` variants are mutually exclusive. `stock` links the
-# crates.io starship and uses its whole-prompt cache path. `fork` builds against
-# the personal starship fork (github.com/zdonghe/starship, pinned by revision
-# below), which adds a segment-level cache API
-# (starship::print::get_prompt_with_cache). Build the fork variant with
-# `cargo build --no-default-features --features fork`.
+
+# Links the upstream `starship` crate from crates.io.
+# Caches whole rendered prompts (per key, minute bucket, exit code).
 stock = ["dep:starship"]
+
+# Links the git fork of `starship`, which adds a segment-level render API
+# (`get_prompt_with_cache` / `get_module_segments` / `ModuleCache`).
+# Caches per-module segments and re-renders the prompt from them.
+#
+# Build with: cargo build --no-default-features --features fork
 fork = ["dep:starship-fork"]
 
 [dependencies]
@@ -38,17 +41,15 @@ tempfile = "3"
 name = "starship-daemon"
 path = "src/main.rs"
 
-[[bench]]
-name = "bench_hotpath"
-harness = false
+# Fork-only integration tests. `required-features` makes cargo skip these
+# targets for stock builds instead of failing on the missing fork API.
+[[test]]
+name = "render_reuse"
+required-features = ["fork"]
 
-[[bench]]
-name = "bench_discovery"
-harness = false
-
-[[bench]]
-name = "bench_gitignore"
-harness = false
+[[test]]
+name = "render_reuse_fresh"
+required-features = ["fork"]
 
 [profile.release]
 lto = "fat"

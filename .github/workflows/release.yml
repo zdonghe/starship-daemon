@@ -1,0 +1,52 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: stock
+            flags: ""
+          - variant: fork
+            flags: --no-default-features --features fork
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release ${{ matrix.flags }}
+      - name: stage ${{ matrix.variant }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path staging -Force
+          Copy-Item target/release/starship-daemon.exe staging/starship-daemon-${{ matrix.variant }}.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: starship-daemon-${{ matrix.variant }}
+          path: staging/*.exe
+
+  publish:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: starship-daemon-*
+          merge-multiple: true
+          path: staging
+      - name: package
+        shell: pwsh
+        run: |
+          Copy-Item starship-daemon.psm1 staging/
+          Compress-Archive staging/* -DestinationPath starship-daemon-$env:GITHUB_REF_NAME.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: starship-daemon-${{ github.ref_name }}.zip

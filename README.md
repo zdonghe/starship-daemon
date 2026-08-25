@@ -6,26 +6,22 @@ A persistent daemon that renders your Starship prompt over a Windows named pipe.
 
 Instead of calling `starship prompt ...` as a subprocess on every prompt, the daemon keeps Starship loaded in memory and sends rendered prompts over `\\.\pipe\starship-daemon`. The client module handles auto-start, pipe communication, and error-code bridging.
 
-## Setup
+## Install
 
-Add this to your `$PROFILE`:
+Requires PowerShell 7.4+ and Windows 10/11 x64.
+
+1. Grab the latest release: the zip from the [releases page](https://github.com/zdonghe/starship-daemon/releases) contains `starship-daemon-stock.exe`, `starship-daemon-fork.exe`, and `starship-daemon.psm1`. (Or build from source - see [Build](#build).)
+2. Put the `exe` and `psm1` in a folder of your choice.
+3. Add this to your `$PROFILE`:
 
 ```powershell
 $env:STARSHIP_DAEMON_PATH = "C:\path\to\starship-daemon.exe"
 Import-Module "C:\path\to\starship-daemon.psm1" -DisableNameChecking
 ```
 
-The module auto-starts the daemon and replaces the `prompt` function. 
+The module auto-starts the daemon and replaces the `prompt` function.
 
-To run code before every prompt (like official starship's `Invoke-Starship-PreCommand` hook), define a global function with that name:
-
-```powershell
-function Invoke-Starship-PreCommand {
-    # Reset cursor shape and write terminal OSC sequences
-    Write-Host -NoNewLine "`e[5 q"
-    $host.ui.Write("$esc]9;12$bel")
-}
-```
+> Use the `-fork.exe` binary for segment-level caching ("fastest", uses the fork - see [Build](#build)). The stock binary is the default for upstream compatibility.
 
 ## Config
 
@@ -37,30 +33,47 @@ $env:STARSHIP_CONFIG = "C:\path\to\starship.toml"
 
 Hot reloading is supported.
 
+## Troubleshooting
+
+Try the following command:
+
+```powershell
+Restart-StarshipDaemon
+```
+
+This is also the fix if the module keeps falling back to the plain prompt after a daemon crash - while the daemon is down the module fails fast to the plain prompt, and it stays that way until you run `Start-StarshipDaemon` or `Restart-StarshipDaemon`.
+
+## Uninstall
+
+Remove the `$env:STARSHIP_DAEMON_PATH` line and the `Import-Module` line from your `$PROFILE`, open a new shell, then optionally stop the daemon:
+
+```powershell
+Stop-StarshipDaemon
+```
+
 ## Build
 
-```
+```powershell
+# Stock build
 cargo build --release
+
+# Fork variant
+cargo build --release --no-default-features --features fork
 ```
 
-The daemon auto-detects at build time (via `build.rs`) which starship it's compiled against:
-
-- **Default (stock starship)**: the `starship` crate resolves from crates.io. The daemon compiles with the stock render API.
-- **Gix-native fork (optional)**: a `[patch.crates-io]` block in `Cargo.toml` pointing at my personal starship fork (`github.com/zdonghe/starship`). When that patch is active, `build.rs` detects it from `Cargo.lock` and enables the fork's segment-level cache API.
 
 ## Performance
 
 200 samples after 15 warmup rounds, measured from PowerShell client across three directories:
 a non-git desktop folder, the [starship](https://github.com/starship/starship) repo, and the [Linux kernel](https://github.com/torvalds/linux) repo.
-Reproduce with `benches/bench-all.ps1`; absolute numbers vary run-to-run (C-state/wake noise), ratios are stable.
+Reproduce with `benches/bench-all.ps1`.
 
 | Config | Desktop (non-git) | starship repo (git) | Linux kernel (git) |
 |--------|-------------------|---------------------|--------------------|
 | `starship prompt` subprocess | 32.04 ms | 208.42 ms | 745.90 ms |
 | IPC + stock (no cache) | 1.13 ms | 61.94 ms | 510.34 ms |
-| IPC + gix-native (no cache) | 0.97 ms | 13.53 ms | 412.96 ms |
-| IPC + gix-native + daemon cache | **0.20 ms** | **0.17 ms** | **0.12 ms** |
-
+| IPC + fork-native (no cache) | 0.97 ms | 13.53 ms | 412.96 ms |
+| IPC + fork-native + daemon cache | **0.20 ms** | **0.17 ms** | **0.12 ms** |
 
 ## Caching
 
@@ -70,24 +83,22 @@ The watcher tracks the entire directory for changes, which tells us when to inva
 
 Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 
-In a stock build, starship exposes no segment API, so the whole rendered prompt is cached instead. If the daemon is built with my fork, then segment level caching will be used.
-
-There is segment level caching for every module **except** `time`, `character`, `status`, and the `all` placeholder (those re-render live on every prompt). If any other module becomes invalid/outdated, that specific module can be recomputed without needing to recompute the entire prompt.
+In a stock build, starship exposes no segment API, so the whole rendered prompt is cached instead. If the daemon is built with the fork, segment-level caching is used: every module is cached **except** `time`, `character`, `status`, and the `all` placeholder (those re-render live on every prompt). If any other module becomes invalid/outdated, that specific module can be recomputed without recomputing the entire prompt.
 
 ## Benchmarking
 
 Run `benches/bench-all.ps1` to reproduce results:
 
 ```powershell
-# Optional: directory to test (defaults to current)
+# Optional: directory to test (defaults to the script's folder)
 $env:STARSHIP_BENCH_DIR = "C:\path\to\repo"
 
 # Required for IPC tests
-$env:STARSHIP_DAEMON_PATH = "C:\path\to\starship-daemon.exe"
+$env:STARSHIP_DAEMON_PATH = "C:\path\to\starship-daemon-stock.exe"
 $env:STARSHIP_CONFIG = "C:\path\to\starship.toml"
 
-# Optional: gix-native daemon for comparison
-$env:STARSHIP_DAEMON_PATH_GIX = "C:\path\to\starship-daemon-gix.exe"
+# Optional: fork-native daemon for comparison
+$env:STARSHIP_DAEMON_PATH_FORK = "C:\path\to\starship-daemon-fork.exe"
 
 benches/bench-all.ps1
 ```

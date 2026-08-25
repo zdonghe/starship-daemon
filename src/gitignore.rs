@@ -45,11 +45,6 @@ pub fn load_gitignore(repo_root: &Path) -> Option<GitignoreFilter> {
     Some(GitignoreFilter { rules })
 }
 
-pub fn is_ignored(ig: &GitignoreFilter, event_path: &Path) -> bool {
-    let path_str = event_path.to_string_lossy().replace('\\', "/");
-    is_ignored_str(ig, &path_str)
-}
-
 pub fn is_ignored_str(ig: &GitignoreFilter, event_path: &str) -> bool {
     let path_comps: Vec<&str> = event_path.split('/').collect();
 
@@ -199,10 +194,6 @@ mod tests {
         }
     }
 
-    fn is_ignored_path(ig: &GitignoreFilter, path: &str) -> bool {
-        is_ignored(ig, Path::new(path))
-    }
-
     fn mkfilter(rules: Vec<Rule>) -> GitignoreFilter {
         GitignoreFilter { rules }
     }
@@ -284,8 +275,8 @@ mod tests {
             mkrulen("*.log", false, false, false),
             mkrulen("!important.log", true, false, false),
         ]);
-        assert!(is_ignored_path(&ig, "debug.log"));
-        assert!(!is_ignored_path(&ig, "important.log"));
+        assert!(is_ignored_str(&ig, "debug.log"));
+        assert!(!is_ignored_str(&ig, "important.log"));
     }
 
     #[test]
@@ -421,11 +412,11 @@ mod tests {
             ig.rules[0].anchored,
             "a/**/b has a middle slash, must be anchored"
         );
-        assert!(is_ignored_path(&ig, "a/b"));
-        assert!(is_ignored_path(&ig, "a/x/b"));
-        assert!(is_ignored_path(&ig, "a/x/y/b"));
+        assert!(is_ignored_str(&ig, "a/b"));
+        assert!(is_ignored_str(&ig, "a/x/b"));
+        assert!(is_ignored_str(&ig, "a/x/y/b"));
         assert!(
-            !is_ignored_path(&ig, "x/a/b"),
+            !is_ignored_str(&ig, "x/a/b"),
             "anchored a/**/b must not match x/a/b"
         );
     }
@@ -436,9 +427,9 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), b"**/build\n").unwrap();
         let ig = load_gitignore(dir.path()).unwrap();
         assert!(!ig.rules[0].anchored, "**/build matches at any level");
-        assert!(is_ignored_path(&ig, "build"));
-        assert!(is_ignored_path(&ig, "x/build"));
-        assert!(is_ignored_path(&ig, "x/y/build"));
+        assert!(is_ignored_str(&ig, "build"));
+        assert!(is_ignored_str(&ig, "x/build"));
+        assert!(is_ignored_str(&ig, "x/y/build"));
     }
 
     #[test]
@@ -451,15 +442,15 @@ mod tests {
             "build/** has a middle slash, must be anchored"
         );
         assert!(
-            !is_ignored_path(&ig, "build"),
+            !is_ignored_str(&ig, "build"),
             "build/** must not ignore bare build"
         );
-        assert!(is_ignored_path(&ig, "build/foo.o"));
+        assert!(is_ignored_str(&ig, "build/foo.o"));
         assert!(
-            !is_ignored_path(&ig, "x/build"),
+            !is_ignored_str(&ig, "x/build"),
             "anchored build/** must not match x/build"
         );
-        assert!(!is_ignored_path(&ig, "x/build/foo.o"));
+        assert!(!is_ignored_str(&ig, "x/build/foo.o"));
     }
 
     #[test]
@@ -468,26 +459,26 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), b"**/foo/bar\n").unwrap();
         let ig = load_gitignore(dir.path()).unwrap();
         assert!(!ig.rules[0].anchored, "**/foo/bar matches at any level");
-        assert!(is_ignored_path(&ig, "foo/bar"));
-        assert!(is_ignored_path(&ig, "x/foo/bar"));
-        assert!(is_ignored_path(&ig, "x/y/foo/bar"));
-        assert!(!is_ignored_path(&ig, "foo/baz"));
+        assert!(is_ignored_str(&ig, "foo/bar"));
+        assert!(is_ignored_str(&ig, "x/foo/bar"));
+        assert!(is_ignored_str(&ig, "x/y/foo/bar"));
+        assert!(!is_ignored_str(&ig, "foo/baz"));
     }
 
     #[test]
     fn is_ignored_dir_only_transitive() {
         let ig = mkfilter(vec![mkrule("node_modules", true, false)]);
-        assert!(is_ignored_path(&ig, "node_modules"));
-        assert!(is_ignored_path(&ig, "node_modules/foo.js"));
-        assert!(is_ignored_path(&ig, "src/node_modules/foo.js"));
+        assert!(is_ignored_str(&ig, "node_modules"));
+        assert!(is_ignored_str(&ig, "node_modules/foo.js"));
+        assert!(is_ignored_str(&ig, "src/node_modules/foo.js"));
     }
 
     #[test]
     fn is_ignored_non_dir_match() {
         let ig = mkfilter(vec![mkrule("*.o", false, false)]);
-        assert!(is_ignored_path(&ig, "main.o"));
-        assert!(is_ignored_path(&ig, "sub/main.o"));
-        assert!(!is_ignored_path(&ig, "main.c"));
+        assert!(is_ignored_str(&ig, "main.o"));
+        assert!(is_ignored_str(&ig, "sub/main.o"));
+        assert!(!is_ignored_str(&ig, "main.c"));
     }
 
     #[test]
@@ -496,32 +487,32 @@ mod tests {
             mkrulen("*.o", false, false, false),
             mkrulen("!important.o", false, false, false),
         ]);
-        assert!(is_ignored_path(&ig, "main.o"));
-        assert!(!is_ignored_path(&ig, "important.o"));
+        assert!(is_ignored_str(&ig, "main.o"));
+        assert!(!is_ignored_str(&ig, "important.o"));
     }
 
     #[test]
     fn is_ignored_anchored_single() {
         let ig = mkfilter(vec![mkrule("build", false, true)]);
-        assert!(is_ignored_path(&ig, "build"));
-        assert!(!is_ignored_path(&ig, "src/build"));
-        assert!(!is_ignored_path(&ig, "src/build/foo.o"));
+        assert!(is_ignored_str(&ig, "build"));
+        assert!(!is_ignored_str(&ig, "src/build"));
+        assert!(!is_ignored_str(&ig, "src/build/foo.o"));
     }
 
     #[test]
     fn is_ignored_anchored_dir_only() {
         let ig = mkfilter(vec![mkrule("target", true, true)]);
-        assert!(is_ignored_path(&ig, "target"));
-        assert!(is_ignored_path(&ig, "target/debug"));
-        assert!(!is_ignored_path(&ig, "src/target"));
-        assert!(!is_ignored_path(&ig, "src/target/debug"));
+        assert!(is_ignored_str(&ig, "target"));
+        assert!(is_ignored_str(&ig, "target/debug"));
+        assert!(!is_ignored_str(&ig, "src/target"));
+        assert!(!is_ignored_str(&ig, "src/target/debug"));
     }
 
     #[test]
     fn is_ignored_multi_segment_anchored() {
         let ig = mkfilter(vec![mkrule("sub/dir", false, false)]);
-        assert!(is_ignored_path(&ig, "sub/dir"));
-        assert!(!is_ignored_path(&ig, "a/sub/dir"));
+        assert!(is_ignored_str(&ig, "sub/dir"));
+        assert!(!is_ignored_str(&ig, "a/sub/dir"));
     }
 
     #[test]
@@ -530,8 +521,8 @@ mod tests {
             mkrule("*.o", false, false),
             mkrule("build", true, true),
         ]);
-        assert!(!is_ignored_path(&ig, "main.c"));
-        assert!(!is_ignored_path(&ig, "src/lib.rs"));
+        assert!(!is_ignored_str(&ig, "main.c"));
+        assert!(!is_ignored_str(&ig, "src/lib.rs"));
     }
 
     #[test]
@@ -540,8 +531,8 @@ mod tests {
             mkrulen("!*.txt", false, false, false),
             mkrulen("*.o", false, false, false),
         ]);
-        assert!(is_ignored_path(&ig, "main.o"));
-        assert!(!is_ignored_path(&ig, "readme.txt"));
+        assert!(is_ignored_str(&ig, "main.o"));
+        assert!(!is_ignored_str(&ig, "readme.txt"));
     }
 
     #[test]
@@ -550,7 +541,7 @@ mod tests {
             mkrule("build", true, false),
             mkrulen("!build/foo.o", false, false, false),
         ]);
-        assert!(is_ignored_path(&ig, "build/foo.o"));
+        assert!(is_ignored_str(&ig, "build/foo.o"));
     }
 
     #[test]
@@ -559,9 +550,9 @@ mod tests {
             mkrule("node_modules", true, false),
             mkrule("target", true, false),
         ]);
-        assert!(is_ignored_path(&ig, "node_modules/pkg/index.js"));
-        assert!(is_ignored_path(&ig, "target/debug/build"));
-        assert!(!is_ignored_path(&ig, "src/main.rs"));
+        assert!(is_ignored_str(&ig, "node_modules/pkg/index.js"));
+        assert!(is_ignored_str(&ig, "target/debug/build"));
+        assert!(!is_ignored_str(&ig, "src/main.rs"));
     }
 
     #[test]
@@ -570,17 +561,17 @@ mod tests {
             mkrule("*.log", false, false),
             mkrule("tmp/**", false, false),
         ]);
-        assert!(is_ignored_path(&ig, "error.log"));
-        assert!(is_ignored_path(&ig, "tmp/x/y/z.txt"));
-        assert!(!is_ignored_path(&ig, "main.rs"));
+        assert!(is_ignored_str(&ig, "error.log"));
+        assert!(is_ignored_str(&ig, "tmp/x/y/z.txt"));
+        assert!(!is_ignored_str(&ig, "main.rs"));
     }
 
     #[test]
     fn is_ignored_deep_nested_dir() {
         let ig = mkfilter(vec![mkrule("a/deep/dir", true, false)]);
-        assert!(is_ignored_path(&ig, "a/deep/dir"));
-        assert!(is_ignored_path(&ig, "a/deep/dir/file.txt"));
-        assert!(!is_ignored_path(&ig, "a/other/file.txt"));
-        assert!(!is_ignored_path(&ig, "other/a/deep/dir"));
+        assert!(is_ignored_str(&ig, "a/deep/dir"));
+        assert!(is_ignored_str(&ig, "a/deep/dir/file.txt"));
+        assert!(!is_ignored_str(&ig, "a/other/file.txt"));
+        assert!(!is_ignored_str(&ig, "other/a/deep/dir"));
     }
 }

@@ -79,6 +79,63 @@ fn extract_watcher_paths(buf: &[u8]) -> Vec<(String, u32)> {
     paths
 }
 
+fn reload_ignore(we: &mut WatchEntry) {
+    #[cfg(debug_assertions)]
+    let _gr = StatGuard::new(&STATS.nanos_reload, Some(&STATS.reloads));
+    we.ignore = load_gitignore(&we.repo_root);
+}
+
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+fn filter_visible(
+    ignore: Option<&GitignoreFilter>,
+    repo_root: &Path,
+    paths: &[(String, u32)],
+) -> bool {
+    #[cfg(debug_assertions)]
+    let _gf = StatGuard::new(&STATS.nanos_filter, None);
+    let mut visible = false;
+    #[cfg(debug_assertions)]
+    let mut internal = 0u64;
+    #[cfg(debug_assertions)]
+    let mut ignored = 0u64;
+
+    for (path, _) in paths {
+        if is_git_internal(path) {
+            #[cfg(debug_assertions)]
+            {
+                internal += 1;
+            }
+        } else if let Some(ig) = ignore {
+            if is_ignored_str(ig, path) {
+                #[cfg(debug_assertions)]
+                {
+                    ignored += 1;
+                }
+                #[cfg(debug_assertions)]
+                {
+                    if stats_on() {
+                        let mut sp = STATS.dropped_samples.lock().unwrap();
+                        if sp.len() < 5 {
+                            sp.push(path.clone());
+                        }
+                    }
+                }
+            } else {
+                visible = true;
+            }
+        } else {
+            visible = true;
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        if stats_on() {
+            repo_stats(repo_root, paths.len() as u64, internal, ignored);
+        }
+    }
+    visible
+}
+
 pub struct WatchEntry {
     repo_root: PathBuf,
     dir_handle: HANDLE,
@@ -114,10 +171,6 @@ impl Drop for WatchEntry {
     }
 }
 
-// box_collection suppressed: entries must stay heap-pinned. start_watch hands
-// the OS raw pointers into change_buf/overlapped that remain valid until the
-// overlapped I/O completes or is cancelled, and entries keep moving while new
-// repos are pushed.
 #[allow(clippy::vec_box)]
 pub struct WatcherState {
     pub(crate) entries: Vec<Box<WatchEntry>>,
@@ -271,63 +324,11 @@ impl WatcherState {
                         }
                     }
 
-                    let mut reload = false;
-                    for (path, _) in &paths {
-                        if path == ".gitignore" {
-                            reload = true;
-                            break;
-                        }
-                    }
+                    let reload = paths.iter().any(|(path, _)| path == ".gitignore");
                     if reload {
-                        #[cfg(debug_assertions)]
-                        let _gr = StatGuard::new(&STATS.nanos_reload, Some(&STATS.reloads));
-                        we.ignore = load_gitignore(&we.repo_root);
+                        reload_ignore(we);
                     }
-                    let visible = {
-                        #[cfg(debug_assertions)]
-                        let _gf = StatGuard::new(&STATS.nanos_filter, None);
-                        let mut visible = false;
-                        #[cfg(debug_assertions)]
-                        let mut internal = 0u64;
-                        #[cfg(debug_assertions)]
-                        let mut ignored = 0u64;
-
-                        for (path, _) in &paths {
-                            if is_git_internal(path) {
-                                #[cfg(debug_assertions)]
-                                {
-                                    internal += 1;
-                                }
-                            } else if let Some(ref ig) = we.ignore {
-                                if is_ignored_str(ig, path) {
-                                    #[cfg(debug_assertions)]
-                                    {
-                                        ignored += 1;
-                                    }
-                                    #[cfg(debug_assertions)]
-                                    {
-                                        if stats_on() {
-                                            let mut sp = STATS.dropped_samples.lock().unwrap();
-                                            if sp.len() < 5 {
-                                                sp.push(path.clone());
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    visible = true;
-                                }
-                            } else {
-                                visible = true;
-                            }
-                        }
-                        #[cfg(debug_assertions)]
-                        {
-                            if stats_on() {
-                                repo_stats(&we.repo_root, paths.len() as u64, internal, ignored);
-                            }
-                        }
-                        visible
-                    };
+                    let visible = filter_visible(we.ignore.as_ref(), &we.repo_root, &paths);
                     reload || visible
                 }
             } else {
@@ -421,7 +422,6 @@ fn start_watch(we: &mut WatchEntry) -> bool {
     }
 }
 
-// ---- debug-only (all cfg(debug_assertions)) ----
 #[cfg(debug_assertions)]
 pub struct RepoStat {
     pub repo: PathBuf,
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn boxed_arm_filters_ignored_writes() {
+    fn gitignore_filter_suppresses_ignored_writes() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("repo");
         std::fs::create_dir_all(p.join("a").join("x")).unwrap();
@@ -668,78 +668,34 @@ mod tests {
     }
 
     #[test]
-    fn git_index_is_not_internal() {
-        assert!(!is_internal(".git/index"));
-    }
-
-    #[test]
-    fn git_head_is_not_internal() {
-        assert!(!is_internal(".git/HEAD"));
-    }
-
-    #[test]
-    fn git_refs_heads_is_not_internal() {
-        assert!(!is_internal(".git/refs/heads/main"));
-        assert!(!is_internal(".git/refs/heads/feature"));
-    }
-
-    #[test]
-    fn git_stash_is_not_internal() {
-        assert!(!is_internal(".git/refs/stash"));
-    }
-
-    #[test]
-    fn git_objects_is_internal() {
-        assert!(is_internal(".git/objects/ab/cdef1234"));
-    }
-
-    #[test]
-    fn git_logs_is_internal() {
-        assert!(is_internal(".git/logs/HEAD"));
-    }
-
-    #[test]
-    fn git_config_is_internal() {
-        assert!(is_internal(".git/config"));
-    }
-
-    #[test]
-    fn git_description_is_internal() {
-        assert!(is_internal(".git/description"));
-    }
-
-    #[test]
-    fn git_remotes_is_not_internal() {
-        assert!(!is_internal(".git/refs/remotes/origin/main"));
-    }
-
-    #[test]
-    fn git_tags_is_internal() {
-        assert!(is_internal(".git/refs/tags/v1.0"));
-    }
-
-    #[test]
-    fn git_hooks_is_internal() {
-        assert!(is_internal(".git/hooks/pre-commit"));
-    }
-
-    #[test]
-    fn dot_git_dir_is_internal() {
-        assert!(is_internal(".git"));
-    }
-
-    #[test]
-    fn non_git_files_are_not_internal() {
-        assert!(!is_internal("somefile.txt"));
-        assert!(!is_internal("src/main.rs"));
-        assert!(!is_internal(".gitignore"));
-    }
-
-    #[test]
-    fn leading_slash_is_stripped() {
-        assert!(!is_internal("/.git/index"));
-        assert!(!is_internal("/.git/HEAD"));
-        assert!(is_internal("/.git/objects/ab/cdef1234"));
+    fn is_internal_cases() {
+        for (path, expected) in [
+            (".git/index", false),
+            (".git/HEAD", false),
+            (".git/refs/heads/main", false),
+            (".git/refs/heads/feature", false),
+            (".git/refs/stash", false),
+            (".git/objects/ab/cdef1234", true),
+            (".git/logs/HEAD", true),
+            (".git/config", true),
+            (".git/description", true),
+            (".git/refs/remotes/origin/main", false),
+            (".git/refs/tags/v1.0", true),
+            (".git/hooks/pre-commit", true),
+            (".git", true),
+            ("somefile.txt", false),
+            ("src/main.rs", false),
+            (".gitignore", false),
+            ("/.git/index", false),
+            ("/.git/HEAD", false),
+            ("/.git/objects/ab/cdef1234", true),
+        ] {
+            assert_eq!(
+                is_internal(path),
+                expected,
+                "is_internal({path:?}) should be {expected}"
+            );
+        }
     }
 
     #[test]

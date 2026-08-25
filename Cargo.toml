@@ -15,18 +15,19 @@ name = "starship_daemon"
 path = "src/lib.rs"
 
 [features]
-default = ["stock"]
-
-# Links the upstream `starship` crate from crates.io.
-# Caches whole rendered prompts (per key, minute bucket, exit code).
-stock = ["dep:starship"]
+default = ["fork"]
 
 # Links the git fork of `starship`, which adds a segment-level render API
 # (`get_prompt_with_cache` / `get_module_segments` / `ModuleCache`).
-# Caches per-module segments and re-renders the prompt from them.
-#
-# Build with: cargo build --no-default-features --features fork
+# Caches per-module segments and re-renders the prompt from them, so
+# minute-bucket expiry never re-runs expensive modules like git_status.
 fork = ["dep:starship-fork"]
+
+# Links the upstream `starship` crate from crates.io.
+# Caches whole rendered prompts (per key, minute bucket, exit code).
+#
+# Build with: cargo build --no-default-features --features stock
+stock = ["dep:starship"]
 
 [dependencies]
 starship = { version = "1", default-features = false, optional = true }

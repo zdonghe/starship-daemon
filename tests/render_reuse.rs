@@ -12,11 +12,17 @@ fn render_cached_reuses_status_at_stable_watcher_version() {
     let repo = r.path();
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
-            .arg("-C").arg(repo)
+            .arg("-C")
+            .arg(repo)
             .args(args)
             .output()
             .expect("git command failed");
-        assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     git(&["init"]);
     git(&["config", "user.email", "test@test"]);
@@ -55,11 +61,17 @@ fn render_cached_reuses_status_at_stable_watcher_version() {
     };
     let key_b = cache::compute_cache_key(&sub, "vi", 120, 0, 7);
     let out2 = render::render_cached(&ctx_b, git_dir.as_deref(), &cfg, &key_b, &mut lru);
-    assert_eq!(out1, out2, "stable watcher version must reuse cached git status (no rescan)");
+    assert_eq!(
+        out1, out2,
+        "stable watcher version must reuse cached git status (no rescan)"
+    );
 
     let key_c = cache::compute_cache_key(&sub, "vi", 120, 0, 8);
     let out3 = render::render_cached(&ctx_b, git_dir.as_deref(), &cfg, &key_c, &mut lru);
-    assert_ne!(out1, out3, "watcher version bump must force a fresh scan reflecting the change");
+    assert_ne!(
+        out1, out3,
+        "watcher version bump must force a fresh scan reflecting the change"
+    );
 }
 
 #[test]
@@ -69,11 +81,17 @@ fn config_change_at_stable_version_forces_fresh_status() {
     let repo = r.path();
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
-            .arg("-C").arg(repo)
+            .arg("-C")
+            .arg(repo)
             .args(args)
             .output()
             .expect("git command failed");
-        assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     git(&["init"]);
     git(&["config", "user.email", "test@test"]);
@@ -96,11 +114,26 @@ fn config_change_at_stable_version_forces_fresh_status() {
         status_code: 0,
         keymap: "vi".to_string(),
     };
-    let out1 = render::render_cached(&ctx, git_dir.as_deref(), &cfg, &cache::compute_cache_key(repo, "vi", 120, 100, 7), &mut lru);
+    let out1 = render::render_cached(
+        &ctx,
+        git_dir.as_deref(),
+        &cfg,
+        &cache::compute_cache_key(repo, "vi", 120, 100, 7),
+        &mut lru,
+    );
 
     std::fs::write(repo.join("untracked.txt"), "new").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(15));
 
-    let out2 = render::render_cached(&ctx, git_dir.as_deref(), &cfg, &cache::compute_cache_key(repo, "vi", 120, 200, 7), &mut lru);
-    assert_ne!(out1, out2, "config change at stable version must force a fresh status scan");
+    let out2 = render::render_cached(
+        &ctx,
+        git_dir.as_deref(),
+        &cfg,
+        &cache::compute_cache_key(repo, "vi", 120, 200, 7),
+        &mut lru,
+    );
+    assert_ne!(
+        out1, out2,
+        "config change at stable version must force a fresh status scan"
+    );
 }

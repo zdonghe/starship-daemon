@@ -1,5 +1,5 @@
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 use starship_daemon::cache;
 use starship_daemon::watch::WatcherState;
@@ -184,8 +184,17 @@ fn bumps_on_cherry_pick() {
     r.git(&["add", "cherry.txt"]);
     r.git(&["commit", "-m", "commit to cherry-pick"]);
     let commit_hash = String::from_utf8(
-        std::process::Command::new("git").arg("-C").arg(r.path()).args(["rev-parse", "HEAD"]).output().unwrap().stdout
-    ).unwrap().trim().to_string();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(r.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
     r.git(&["checkout", "other"]);
     ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
@@ -228,7 +237,10 @@ fn bumps_on_fetch() {
     git(&wt_a, &["branch", "-M", "main"]);
     git(&wt_a, &["config", "user.email", "test@test"]);
     git(&wt_a, &["config", "user.name", "test"]);
-    git(&wt_a, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
+    git(
+        &wt_a,
+        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+    );
     std::fs::write(wt_a.join("init.txt"), "init").unwrap();
     git(&wt_a, &["add", "init.txt"]);
     git(&wt_a, &["commit", "-m", "init"]);
@@ -241,8 +253,14 @@ fn bumps_on_fetch() {
     git(&wt_b, &["branch", "-M", "main"]);
     git(&wt_b, &["config", "user.email", "test@test"]);
     git(&wt_b, &["config", "user.name", "test"]);
-    git(&wt_b, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
-    git(&wt_b, &["pull", "origin", "main", "--allow-unrelated-histories"]);
+    git(
+        &wt_b,
+        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+    );
+    git(
+        &wt_b,
+        &["pull", "origin", "main", "--allow-unrelated-histories"],
+    );
     std::fs::write(wt_b.join("new.txt"), "new data").unwrap();
     git(&wt_b, &["add", "new.txt"]);
     git(&wt_b, &["commit", "-m", "second commit"]);
@@ -271,7 +289,10 @@ fn bumps_on_pull() {
     git(&wt_a, &["branch", "-M", "main"]);
     git(&wt_a, &["config", "user.email", "test@test"]);
     git(&wt_a, &["config", "user.name", "test"]);
-    git(&wt_a, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
+    git(
+        &wt_a,
+        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+    );
     std::fs::write(wt_a.join("init.txt"), "init").unwrap();
     git(&wt_a, &["add", "init.txt"]);
     git(&wt_a, &["commit", "-m", "init"]);
@@ -284,8 +305,14 @@ fn bumps_on_pull() {
     git(&wt_b, &["branch", "-M", "main"]);
     git(&wt_b, &["config", "user.email", "test@test"]);
     git(&wt_b, &["config", "user.name", "test"]);
-    git(&wt_b, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
-    git(&wt_b, &["pull", "origin", "main", "--allow-unrelated-histories"]);
+    git(
+        &wt_b,
+        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+    );
+    git(
+        &wt_b,
+        &["pull", "origin", "main", "--allow-unrelated-histories"],
+    );
     std::fs::write(wt_b.join("new.txt"), "new data").unwrap();
     git(&wt_b, &["add", "new.txt"]);
     git(&wt_b, &["commit", "-m", "second commit"]);
@@ -309,7 +336,10 @@ fn bumps_on_push() {
 
     let r = TestRepo::new();
     let repo_path = r.path().to_path_buf();
-    git(&repo_path, &["remote", "add", "origin", bare_path.to_str().unwrap()]);
+    git(
+        &repo_path,
+        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+    );
     r.write("push_me.txt", "push content");
     r.git(&["add", "push_me.txt"]);
     r.git(&["commit", "-m", "commit to push"]);
@@ -370,7 +400,11 @@ fn ignored_file_does_not_increase_version() {
     r.write("ignored_file.txt", "should be ignored by git");
     std::thread::sleep(std::time::Duration::from_millis(300));
     w.poll();
-    assert_eq!(w.version(r.path()), before, "ignored file should NOT increase version");
+    assert_eq!(
+        w.version(r.path()),
+        before,
+        "ignored file should NOT increase version"
+    );
 }
 
 #[test]
@@ -406,9 +440,14 @@ fn config_mtime_changes_cache_key() {
             break;
         }
     }
-    assert_ne!(mtime_after, mtime_before,
-        "config mtime did not change across backoff retries (mtime granularity too coarse for this filesystem)");
+    assert_ne!(
+        mtime_after, mtime_before,
+        "config mtime did not change across backoff retries (mtime granularity too coarse for this filesystem)"
+    );
 
     let key_after = cache::compute_cache_key(r.path(), "vi", 120, mtime_after, 0);
-    assert_ne!(key_before, key_after, "config change should produce different cache key (config_mtime tracked)");
+    assert_ne!(
+        key_before, key_after,
+        "config change should produce different cache key (config_mtime tracked)"
+    );
 }

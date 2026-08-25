@@ -2,7 +2,7 @@ use starship_daemon::ffi;
 use starship_daemon::watch::WatcherState;
 
 mod common;
-use common::{assert_version_bumped, TestRepo};
+use common::{TestRepo, assert_version_bumped};
 
 fn write_file(repo: &TestRepo, name: &str, content: &str) {
     repo.write(name, content);
@@ -56,14 +56,20 @@ fn poll_increases_version_on_file_change() {
     write_file(&repo, "trigger", "hello");
     settle_watcher();
     w.poll();
-    assert!(w.version(&p) > v0, "version should increase after file write");
+    assert!(
+        w.version(&p) > v0,
+        "version should increase after file write"
+    );
 
     let v1 = w.version(&p);
 
     write_file(&repo, "trigger2", "world");
     settle_watcher();
     w.poll();
-    assert!(w.version(&p) > v1, "version should increase again after second file write");
+    assert!(
+        w.version(&p) > v1,
+        "version should increase again after second file write"
+    );
 }
 
 #[test]
@@ -96,7 +102,11 @@ fn anchored_doublestar_rule_suppresses_matching_paths() {
     repo.write("a/x/b", "hello");
     for _ in 0..10 {
         w.poll();
-        assert_eq!(w.version(&p), v0, "a/x/b must match anchored a/**/b and not bump");
+        assert_eq!(
+            w.version(&p),
+            v0,
+            "a/x/b must match anchored a/**/b and not bump"
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
@@ -132,9 +142,12 @@ fn cancel_io_is_needed_readdirectorychangesw_pending_at_drop() {
     // Overlapped IO is pending — CancelIoEx is required before CloseHandle.
     let rc = unsafe { ffi::WaitForSingleObject(w.change_event(0), 0) };
 
-    assert_eq!(rc, ffi::WAIT_TIMEOUT,
+    assert_eq!(
+        rc,
+        ffi::WAIT_TIMEOUT,
         "ReadDirectoryChangesW unexpectedly completed immediately (rc={rc}). \
-         IO should be pending. Without CancelIoEx, CloseHandle in drop races with it.");
+         IO should be pending. Without CancelIoEx, CloseHandle in drop races with it."
+    );
 
     // w is dropped here. CancelIoEx + GetOverlappedResult ensures safety.
 }

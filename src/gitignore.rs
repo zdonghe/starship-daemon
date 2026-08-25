@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 pub struct Rule {
     pub parts: Vec<String>,
@@ -14,23 +14,34 @@ pub struct GitignoreFilter {
 
 pub fn parse_rule_line(line: &str) -> Option<Rule> {
     let line = line.trim();
-    if line.is_empty() || line.starts_with('#') { return None; }
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
     let trimmed = line.strip_prefix('!').unwrap_or(line);
     let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
     let pattern = stripped.strip_suffix('/').unwrap_or(stripped);
     let negate = line != trimmed;
     let anchored = trimmed != stripped || (pattern.contains('/') && !pattern.starts_with("**/"));
     let dir_only = stripped != pattern;
-    if pattern.is_empty() { return None; }
+    if pattern.is_empty() {
+        return None;
+    }
     let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
-    Some(Rule { parts, negate, dir_only, anchored })
+    Some(Rule {
+        parts,
+        negate,
+        dir_only,
+        anchored,
+    })
 }
 
 pub fn load_gitignore(repo_root: &Path) -> Option<GitignoreFilter> {
     let gitignore_path = repo_root.join(".gitignore");
     let content = fs::read_to_string(&gitignore_path).ok()?;
     let rules: Vec<Rule> = content.lines().filter_map(parse_rule_line).collect();
-    if rules.is_empty() { return None; }
+    if rules.is_empty() {
+        return None;
+    }
     Some(GitignoreFilter { rules })
 }
 
@@ -46,16 +57,22 @@ pub fn is_ignored_str(ig: &GitignoreFilter, event_path: &str) -> bool {
     for depth in (0..path_comps.len()).rev() {
         let comps = &path_comps[..=depth];
         for rule in &ig.rules {
-            if !rule.dir_only { continue; }
+            if !rule.dir_only {
+                continue;
+            }
             if path_match(&rule.parts, comps, rule.anchored) {
                 result = !rule.negate;
             }
         }
-        if result { return true; }
+        if result {
+            return true;
+        }
     }
 
     for rule in &ig.rules {
-        if rule.dir_only { continue; }
+        if rule.dir_only {
+            continue;
+        }
         if path_match(&rule.parts, &path_comps, rule.anchored) {
             result = !rule.negate;
         }
@@ -79,7 +96,10 @@ pub fn component_match(pattern: &str, name: &str) -> bool {
                 match_component(&p[pc.len_utf8()..], n)
                     || match_component(p, &n[n.chars().next().unwrap().len_utf8()..])
             }
-            '?' => match_component(&p[pc.len_utf8()..], &n[n.chars().next().unwrap().len_utf8()..]),
+            '?' => match_component(
+                &p[pc.len_utf8()..],
+                &n[n.chars().next().unwrap().len_utf8()..],
+            ),
             c => {
                 let nc = n.chars().next().unwrap();
                 c == nc && match_component(&p[pc.len_utf8()..], &n[nc.len_utf8()..])
@@ -103,14 +123,17 @@ pub fn path_match(parts: &[String], path_comps: &[&str], anchored: bool) -> bool
 
 fn match_single_component(part: &str, path_comps: &[&str], anchored: bool) -> bool {
     if anchored {
-        path_comps.first().map_or(false, |c| component_match(part, c))
+        path_comps.first().is_some_and(|c| component_match(part, c))
     } else {
         path_comps.iter().any(|c| component_match(part, c))
     }
 }
 
 fn match_leading_components(parts: &[String], path_comps: &[&str]) -> bool {
-    parts.iter().zip(path_comps.iter()).all(|(p, c)| component_match(p, c))
+    parts
+        .iter()
+        .zip(path_comps.iter())
+        .all(|(p, c)| component_match(p, c))
 }
 
 fn match_with_doublestar(parts: &[String], path_comps: &[&str], anchored: bool) -> bool {
@@ -121,7 +144,11 @@ fn match_with_doublestar(parts: &[String], path_comps: &[&str], anchored: bool) 
         if parts[pi] == "**" {
             let remaining = parts.len() - pi - 1;
 
-            let min_consume = if remaining == 0 && parts.len() > 1 { 1 } else { 0 };
+            let min_consume = if remaining == 0 && parts.len() > 1 {
+                1
+            } else {
+                0
+            };
             let max = comps.len().saturating_sub(remaining);
             for end in (ci + min_consume)..=max {
                 if walk(pi + 1, end, parts, comps) {
@@ -130,7 +157,9 @@ fn match_with_doublestar(parts: &[String], path_comps: &[&str], anchored: bool) 
             }
             return false;
         }
-        if ci >= comps.len() { return false; }
+        if ci >= comps.len() {
+            return false;
+        }
         if component_match(&parts[pi], comps[ci]) {
             return walk(pi + 1, ci + 1, parts, comps);
         }
@@ -150,14 +179,24 @@ mod tests {
 
     fn mkrule(pat: &str, dir_only: bool, anchored: bool) -> Rule {
         let parts: Vec<String> = pat.split('/').map(|s| s.to_string()).collect();
-        Rule { parts, negate: false, dir_only, anchored }
+        Rule {
+            parts,
+            negate: false,
+            dir_only,
+            anchored,
+        }
     }
 
     fn mkrulen(pat: &str, negate: bool, dir_only: bool, anchored: bool) -> Rule {
         let has_bang = pat.starts_with('!');
         let stripped = if has_bang { &pat[1..] } else { pat };
         let parts: Vec<String> = stripped.split('/').map(|s| s.to_string()).collect();
-        Rule { parts, negate: negate || has_bang, dir_only, anchored }
+        Rule {
+            parts,
+            negate: negate || has_bang,
+            dir_only,
+            anchored,
+        }
     }
 
     fn is_ignored_path(ig: &GitignoreFilter, path: &str) -> bool {
@@ -294,7 +333,10 @@ mod tests {
     #[test]
     fn path_match_doublestar_suffix() {
         let r = mkrule("build/**", false, true);
-        assert!(!path_match(&r.parts, &["build"], true), "build/** must not match bare build");
+        assert!(
+            !path_match(&r.parts, &["build"], true),
+            "build/** must not match bare build"
+        );
         assert!(path_match(&r.parts, &["build", "foo.o"], true));
         assert!(path_match(&r.parts, &["build", "sub", "foo.o"], true));
         assert!(!path_match(&r.parts, &["x", "build", "foo.o"], true));
@@ -303,7 +345,10 @@ mod tests {
     #[test]
     fn path_match_trailing_doublestar_requires_directory_context() {
         let r = mkrule("a/**", false, true);
-        assert!(!path_match(&r.parts, &["a"], true), "a/** must not match bare a");
+        assert!(
+            !path_match(&r.parts, &["a"], true),
+            "a/** must not match bare a"
+        );
         assert!(path_match(&r.parts, &["a", "f"], true));
         assert!(path_match(&r.parts, &["a", "x", "f"], true));
         assert!(!path_match(&r.parts, &["x", "a", "f"], true));
@@ -340,8 +385,11 @@ mod tests {
     #[test]
     fn load_gitignore_simple_patterns() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".gitignore"),
-            b"*.o\nbuild\ntarget/\n!important.o\n/tmp\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            b"*.o\nbuild\ntarget/\n!important.o\n/tmp\n",
+        )
+        .unwrap();
         let ig = load_gitignore(dir.path()).unwrap();
         assert_eq!(ig.rules.len(), 5);
 
@@ -369,11 +417,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".gitignore"), b"a/**/b\n").unwrap();
         let ig = load_gitignore(dir.path()).unwrap();
-        assert!(ig.rules[0].anchored, "a/**/b has a middle slash, must be anchored");
+        assert!(
+            ig.rules[0].anchored,
+            "a/**/b has a middle slash, must be anchored"
+        );
         assert!(is_ignored_path(&ig, "a/b"));
         assert!(is_ignored_path(&ig, "a/x/b"));
         assert!(is_ignored_path(&ig, "a/x/y/b"));
-        assert!(!is_ignored_path(&ig, "x/a/b"), "anchored a/**/b must not match x/a/b");
+        assert!(
+            !is_ignored_path(&ig, "x/a/b"),
+            "anchored a/**/b must not match x/a/b"
+        );
     }
 
     #[test]
@@ -392,10 +446,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".gitignore"), b"build/**\n").unwrap();
         let ig = load_gitignore(dir.path()).unwrap();
-        assert!(ig.rules[0].anchored, "build/** has a middle slash, must be anchored");
-        assert!(!is_ignored_path(&ig, "build"), "build/** must not ignore bare build");
+        assert!(
+            ig.rules[0].anchored,
+            "build/** has a middle slash, must be anchored"
+        );
+        assert!(
+            !is_ignored_path(&ig, "build"),
+            "build/** must not ignore bare build"
+        );
         assert!(is_ignored_path(&ig, "build/foo.o"));
-        assert!(!is_ignored_path(&ig, "x/build"), "anchored build/** must not match x/build");
+        assert!(
+            !is_ignored_path(&ig, "x/build"),
+            "anchored build/** must not match x/build"
+        );
         assert!(!is_ignored_path(&ig, "x/build/foo.o"));
     }
 
@@ -413,9 +476,7 @@ mod tests {
 
     #[test]
     fn is_ignored_dir_only_transitive() {
-        let ig = mkfilter(vec![
-            mkrule("node_modules", true, false),
-        ]);
+        let ig = mkfilter(vec![mkrule("node_modules", true, false)]);
         assert!(is_ignored_path(&ig, "node_modules"));
         assert!(is_ignored_path(&ig, "node_modules/foo.js"));
         assert!(is_ignored_path(&ig, "src/node_modules/foo.js"));
@@ -423,9 +484,7 @@ mod tests {
 
     #[test]
     fn is_ignored_non_dir_match() {
-        let ig = mkfilter(vec![
-            mkrule("*.o", false, false),
-        ]);
+        let ig = mkfilter(vec![mkrule("*.o", false, false)]);
         assert!(is_ignored_path(&ig, "main.o"));
         assert!(is_ignored_path(&ig, "sub/main.o"));
         assert!(!is_ignored_path(&ig, "main.c"));
@@ -443,9 +502,7 @@ mod tests {
 
     #[test]
     fn is_ignored_anchored_single() {
-        let ig = mkfilter(vec![
-            mkrule("build", false, true),
-        ]);
+        let ig = mkfilter(vec![mkrule("build", false, true)]);
         assert!(is_ignored_path(&ig, "build"));
         assert!(!is_ignored_path(&ig, "src/build"));
         assert!(!is_ignored_path(&ig, "src/build/foo.o"));
@@ -453,9 +510,7 @@ mod tests {
 
     #[test]
     fn is_ignored_anchored_dir_only() {
-        let ig = mkfilter(vec![
-            mkrule("target", true, true),
-        ]);
+        let ig = mkfilter(vec![mkrule("target", true, true)]);
         assert!(is_ignored_path(&ig, "target"));
         assert!(is_ignored_path(&ig, "target/debug"));
         assert!(!is_ignored_path(&ig, "src/target"));
@@ -464,9 +519,7 @@ mod tests {
 
     #[test]
     fn is_ignored_multi_segment_anchored() {
-        let ig = mkfilter(vec![
-            mkrule("sub/dir", false, false),
-        ]);
+        let ig = mkfilter(vec![mkrule("sub/dir", false, false)]);
         assert!(is_ignored_path(&ig, "sub/dir"));
         assert!(!is_ignored_path(&ig, "a/sub/dir"));
     }
@@ -524,9 +577,7 @@ mod tests {
 
     #[test]
     fn is_ignored_deep_nested_dir() {
-        let ig = mkfilter(vec![
-            mkrule("a/deep/dir", true, false),
-        ]);
+        let ig = mkfilter(vec![mkrule("a/deep/dir", true, false)]);
         assert!(is_ignored_path(&ig, "a/deep/dir"));
         assert!(is_ignored_path(&ig, "a/deep/dir/file.txt"));
         assert!(!is_ignored_path(&ig, "a/other/file.txt"));

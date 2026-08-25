@@ -8,25 +8,35 @@ use lru::LruCache;
 extern crate starship_fork as starship;
 
 #[cfg(all(feature = "stock", feature = "fork"))]
-compile_error!("features `stock` and `fork` are mutually exclusive; build the fork variant with `cargo build --no-default-features --features fork`");
+compile_error!(
+    "features `stock` and `fork` are mutually exclusive; build the fork variant with `cargo build --no-default-features --features fork`"
+);
 
 #[cfg(not(any(feature = "stock", feature = "fork")))]
-compile_error!("one of the `stock` or `fork` features is required (default is `stock`); build the fork variant with `cargo build --no-default-features --features fork`");
+compile_error!(
+    "one of the `stock` or `fork` features is required (default is `stock`); build the fork variant with `cargo build --no-default-features --features fork`"
+);
 
 pub const PIPE_NAME: &str = r"\\.\pipe\starship-daemon";
 
 pub fn pipe_name() -> String {
-    std::env::var("STARSHIP_DAEMON_PIPE").map(|n| {
-        if n.starts_with(r"\\.\pipe\") { n } else { format!(r"\\.\pipe\{n}") }
-    }).unwrap_or_else(|_| PIPE_NAME.to_string())
+    std::env::var("STARSHIP_DAEMON_PIPE")
+        .map(|n| {
+            if n.starts_with(r"\\.\pipe\") {
+                n
+            } else {
+                format!(r"\\.\pipe\{n}")
+            }
+        })
+        .unwrap_or_else(|_| PIPE_NAME.to_string())
 }
 
 pub mod cache;
 pub mod daemon;
 pub mod ffi;
+pub mod gitignore;
 pub mod render;
 pub mod watch;
-pub mod gitignore;
 
 fn find_git_dir_uncached(cwd: &Path) -> Option<PathBuf> {
     for d in cwd.ancestors() {
@@ -52,11 +62,17 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
     use std::sync::LazyLock;
     static CACHE: LazyLock<Mutex<LruCache<PathBuf, Option<PathBuf>>>> =
         LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap())));
-    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(result) = cache.get(cwd) {
         return result.clone();
     }
-    let actual = if cwd.as_os_str().is_empty() { Path::new(".") } else { cwd };
+    let actual = if cwd.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        cwd
+    };
     let result = find_git_dir_uncached(actual);
     cache.put(actual.to_path_buf(), result.clone());
     result
@@ -97,17 +113,28 @@ pub struct ParsedRequest {
 }
 
 pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
-    if data.len() < HEADER_LEN { return None; }
-    if data[0] != PROTO_VERSION { return None; }
+    if data.len() < HEADER_LEN {
+        return None;
+    }
+    if data[0] != PROTO_VERSION {
+        return None;
+    }
     let total_len = u32::from_le_bytes(data[1..HEADER_LEN].try_into().unwrap()) as usize;
-    if total_len > MAX_TOTAL_LEN { return None; }
-    if HEADER_LEN + total_len > data.len() { return None; }
+    if total_len > MAX_TOTAL_LEN {
+        return None;
+    }
+    if HEADER_LEN + total_len > data.len() {
+        return None;
+    }
     let body = &data[HEADER_LEN..HEADER_LEN + total_len];
     let mut off = 0usize;
 
     let cwd_len = read_u32(body, &mut off)? as usize;
-    if cwd_len > MAX_CWD_LEN { return None; }
-    let cwd = PathBuf::from(String::from_utf8_lossy(read_slice(body, &mut off, cwd_len)?).into_owned());
+    if cwd_len > MAX_CWD_LEN {
+        return None;
+    }
+    let cwd =
+        PathBuf::from(String::from_utf8_lossy(read_slice(body, &mut off, cwd_len)?).into_owned());
 
     let status_code = read_i32(body, &mut off)?;
 
@@ -115,7 +142,9 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
     let keymap = if keymap_len == 0 {
         None
     } else {
-        if keymap_len > MAX_KEYMAP_LEN { return None; }
+        if keymap_len > MAX_KEYMAP_LEN {
+            return None;
+        }
         Some(String::from_utf8_lossy(read_slice(body, &mut off, keymap_len)?).into_owned())
     };
 
@@ -125,7 +154,9 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
     let starship_config = if config_len == 0 {
         None
     } else {
-        if config_len > MAX_CONFIG_LEN { return None; }
+        if config_len > MAX_CONFIG_LEN {
+            return None;
+        }
         Some(String::from_utf8_lossy(read_slice(body, &mut off, config_len)?).into_owned())
     };
 
@@ -133,27 +164,41 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
 
     Some(ParsedRequest {
         cwd,
-        props: ClientProps { status_code, keymap, terminal_width, starship_config, disable_cache: disable != 0 },
+        props: ClientProps {
+            status_code,
+            keymap,
+            terminal_width,
+            starship_config,
+            disable_cache: disable != 0,
+        },
     })
 }
 
 fn read_slice<'a>(body: &'a [u8], off: &mut usize, n: usize) -> Option<&'a [u8]> {
-    if *off + n > body.len() { return None; }
+    if *off + n > body.len() {
+        return None;
+    }
     let s = &body[*off..*off + n];
     *off += n;
     Some(s)
 }
 
-fn read_u32<'a>(body: &'a [u8], off: &mut usize) -> Option<u32> {
-    Some(u32::from_le_bytes(read_slice(body, off, 4)?.try_into().unwrap()))
+fn read_u32(body: &[u8], off: &mut usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        read_slice(body, off, 4)?.try_into().unwrap(),
+    ))
 }
 
-fn read_i32<'a>(body: &'a [u8], off: &mut usize) -> Option<i32> {
-    Some(i32::from_le_bytes(read_slice(body, off, 4)?.try_into().unwrap()))
+fn read_i32(body: &[u8], off: &mut usize) -> Option<i32> {
+    Some(i32::from_le_bytes(
+        read_slice(body, off, 4)?.try_into().unwrap(),
+    ))
 }
 
-fn read_u16<'a>(body: &'a [u8], off: &mut usize) -> Option<u16> {
-    Some(u16::from_le_bytes(read_slice(body, off, 2)?.try_into().unwrap()))
+fn read_u16(body: &[u8], off: &mut usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        read_slice(body, off, 2)?.try_into().unwrap(),
+    ))
 }
 
 #[cfg(test)]
@@ -162,7 +207,14 @@ mod tests {
 
     const FIXED_BODY_LEN: usize = 17;
 
-    fn encode_body(cwd: &str, status: i32, keymap: Option<&str>, width: u32, config: Option<&str>, disable: bool) -> Vec<u8> {
+    fn encode_body(
+        cwd: &str,
+        status: i32,
+        keymap: Option<&str>,
+        width: u32,
+        config: Option<&str>,
+        disable: bool,
+    ) -> Vec<u8> {
         let cwd_b = cwd.as_bytes();
         let keymap_b = keymap.map(|s| s.as_bytes()).unwrap_or_default();
         let config_b = config.map(|s| s.as_bytes()).unwrap_or_default();
@@ -179,7 +231,14 @@ mod tests {
         body
     }
 
-    fn encode_request_v1(cwd: &str, status: i32, keymap: Option<&str>, width: u32, config: Option<&str>, disable: bool) -> Vec<u8> {
+    fn encode_request_v1(
+        cwd: &str,
+        status: i32,
+        keymap: Option<&str>,
+        width: u32,
+        config: Option<&str>,
+        disable: bool,
+    ) -> Vec<u8> {
         let body = encode_body(cwd, status, keymap, width, config, disable);
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -199,17 +258,32 @@ mod tests {
 
     #[test]
     fn parse_request_valid_full() {
-        let data = encode_request_v1("/home/user/project", 139, Some("vi"), 120, Some(r"C:\config.toml"), true);
+        let data = encode_request_v1(
+            "/home/user/project",
+            139,
+            Some("vi"),
+            120,
+            Some(r"C:\config.toml"),
+            true,
+        );
         let r = parse_request(&data);
         assert!(r.is_some());
         let req = r.unwrap();
         assert_eq!(req.cwd, PathBuf::from("/home/user/project"));
-        assert_eq!(decode(&req), (139, Some("vi".to_string()), 120, Some(r"C:\config.toml".to_string()), true));
+        assert_eq!(
+            decode(&req),
+            (
+                139,
+                Some("vi".to_string()),
+                120,
+                Some(r"C:\config.toml".to_string()),
+                true
+            )
+        );
     }
 
     #[test]
     fn parse_request_minimal() {
-
         let data = encode_request_v1("", 0, None, 0, None, false);
         assert_eq!(data.len(), HEADER_LEN + FIXED_BODY_LEN);
         let r = parse_request(&data);
@@ -221,7 +295,6 @@ mod tests {
 
     #[test]
     fn parse_request_empty_keymap_is_none() {
-
         let data = encode_request_v1(".", 0, None, 0, None, false);
         let req = parse_request(&data).unwrap();
         assert_eq!(req.props.keymap, None);
@@ -264,7 +337,6 @@ mod tests {
 
     #[test]
     fn parse_request_trailing_bytes_tolerated() {
-
         let mut data = encode_request_v1(".", 0, Some("vi"), 120, None, true);
         data.push(0);
         data.push(0xde);
@@ -276,17 +348,18 @@ mod tests {
 
     #[test]
     fn parse_request_disable_nonzero_is_true() {
-
         let mut data = encode_request_v1(".", 0, None, 0, None, false);
         let last = data.len() - 1;
         data[last] = 0xff;
         let req = parse_request(&data).unwrap();
-        assert!(req.props.disable_cache, "disable byte 0xff must decode to disable_cache = true");
+        assert!(
+            req.props.disable_cache,
+            "disable byte 0xff must decode to disable_cache = true"
+        );
     }
 
     #[test]
     fn parse_request_cwd_len_overrun() {
-
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
         data.extend_from_slice(&100u32.to_le_bytes());
@@ -300,7 +373,6 @@ mod tests {
 
     #[test]
     fn parse_request_cwd_len_too_big() {
-
         let body_len = FIXED_BODY_LEN + MAX_CWD_LEN + 1;
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(body_len as u32).to_le_bytes());
@@ -311,7 +383,6 @@ mod tests {
 
     #[test]
     fn parse_request_keymap_overrun() {
-
         let mut data = vec![PROTO_VERSION];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
@@ -338,13 +409,15 @@ mod tests {
 
     #[test]
     fn parse_request_cwd_eats_tail_never_panics() {
-
         for cwd_len in 1..=13usize {
             let mut data = vec![PROTO_VERSION];
             data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
             data.extend_from_slice(&(cwd_len as u32).to_le_bytes());
             data.resize(HEADER_LEN + FIXED_BODY_LEN, 0);
-            assert!(parse_request(&data).is_none(), "cwd_len={cwd_len} must be rejected");
+            assert!(
+                parse_request(&data).is_none(),
+                "cwd_len={cwd_len} must be rejected"
+            );
         }
 
         let mut data = vec![PROTO_VERSION];
@@ -368,21 +441,52 @@ mod tests {
 
     #[test]
     fn parse_request_exact_boundary_caps() {
-
         let ok = encode_request_v1(&"a".repeat(MAX_CWD_LEN), 0, None, 0, None, false);
-        assert!(parse_request(&ok).is_some(), "cwd_len == MAX_CWD_LEN must fit");
+        assert!(
+            parse_request(&ok).is_some(),
+            "cwd_len == MAX_CWD_LEN must fit"
+        );
         let over = encode_request_v1(&"a".repeat(MAX_CWD_LEN + 1), 0, None, 0, None, false);
-        assert!(parse_request(&over).is_none(), "cwd_len == MAX_CWD_LEN + 1 must be rejected");
+        assert!(
+            parse_request(&over).is_none(),
+            "cwd_len == MAX_CWD_LEN + 1 must be rejected"
+        );
 
         let ok = encode_request_v1(".", 0, Some(&"k".repeat(MAX_KEYMAP_LEN)), 0, None, false);
-        assert!(parse_request(&ok).is_some(), "keymap_len == MAX_KEYMAP_LEN must fit");
-        let over = encode_request_v1(".", 0, Some(&"k".repeat(MAX_KEYMAP_LEN + 1)), 0, None, false);
-        assert!(parse_request(&over).is_none(), "keymap_len == MAX_KEYMAP_LEN + 1 must be rejected");
+        assert!(
+            parse_request(&ok).is_some(),
+            "keymap_len == MAX_KEYMAP_LEN must fit"
+        );
+        let over = encode_request_v1(
+            ".",
+            0,
+            Some(&"k".repeat(MAX_KEYMAP_LEN + 1)),
+            0,
+            None,
+            false,
+        );
+        assert!(
+            parse_request(&over).is_none(),
+            "keymap_len == MAX_KEYMAP_LEN + 1 must be rejected"
+        );
 
         let ok = encode_request_v1(".", 0, None, 0, Some(&"c".repeat(MAX_CONFIG_LEN)), false);
-        assert!(parse_request(&ok).is_some(), "config_len == MAX_CONFIG_LEN must fit");
-        let over = encode_request_v1(".", 0, None, 0, Some(&"c".repeat(MAX_CONFIG_LEN + 1)), false);
-        assert!(parse_request(&over).is_none(), "config_len == MAX_CONFIG_LEN + 1 must be rejected");
+        assert!(
+            parse_request(&ok).is_some(),
+            "config_len == MAX_CONFIG_LEN must fit"
+        );
+        let over = encode_request_v1(
+            ".",
+            0,
+            None,
+            0,
+            Some(&"c".repeat(MAX_CONFIG_LEN + 1)),
+            false,
+        );
+        assert!(
+            parse_request(&over).is_none(),
+            "config_len == MAX_CONFIG_LEN + 1 must be rejected"
+        );
     }
 
     #[test]
@@ -398,7 +502,6 @@ mod tests {
 
     #[test]
     fn parse_request_non_utf8_keymap_and_config_are_lossy() {
-
         let keymap_b = [0xffu8, 0xfe];
         let config_b = [0x80u8, 0x81];
         let body_len = FIXED_BODY_LEN + keymap_b.len() + config_b.len();

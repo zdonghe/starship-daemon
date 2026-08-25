@@ -11,11 +11,17 @@ pub const SLEEP_MS: u64 = 15;
 
 pub fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
-        .arg("-C").arg(repo)
+        .arg("-C")
+        .arg(repo)
         .args(args)
         .output()
         .expect("git command failed");
-    assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 pub fn assert_version_bumped(w: &mut WatcherState, repo: &Path) {
@@ -23,7 +29,9 @@ pub fn assert_version_bumped(w: &mut WatcherState, repo: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         w.poll();
-        if w.version(repo) > before { return; }
+        if w.version(repo) > before {
+            return;
+        }
         thread::sleep(Duration::from_millis(20));
         if Instant::now() > deadline {
             panic!("repo version did not increase within 5s (before={before})");
@@ -70,7 +78,6 @@ impl TestRepo {
     pub fn remove(&self, name: &str) {
         std::fs::remove_file(self.path().join(name)).unwrap();
     }
-
 }
 
 pub fn current_branch(repo: &Path) -> String {

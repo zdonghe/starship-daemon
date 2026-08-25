@@ -66,13 +66,19 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        lru.put(key.clone(), CachedValue {
-            rendered: "SEEDED".to_string(),
-            time_bucket: current_minute(),
-            status_code: 0,
-        });
+        lru.put(
+            key.clone(),
+            CachedValue {
+                rendered: "SEEDED".to_string(),
+                time_bucket: current_minute(),
+                status_code: 0,
+            },
+        );
         let r = render_cached(&ctx(cwd.path(), 0), None, &cfg(), &key, &mut lru);
-        assert_eq!(r, "SEEDED", "same minute + status must serve the cache, not re-render");
+        assert_eq!(
+            r, "SEEDED",
+            "same minute + status must serve the cache, not re-render"
+        );
     }
 
     #[test]
@@ -80,14 +86,20 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        lru.put(key.clone(), CachedValue {
-            rendered: "SEEDED".to_string(),
-            time_bucket: current_minute(),
-            status_code: 0,
-        });
+        lru.put(
+            key.clone(),
+            CachedValue {
+                rendered: "SEEDED".to_string(),
+                time_bucket: current_minute(),
+                status_code: 0,
+            },
+        );
         let r = render_cached(&ctx(cwd.path(), 1), None, &cfg(), &key, &mut lru);
         assert_ne!(r, "SEEDED", "status change must miss the cache");
-        assert!(r.contains("C-ERR"), "status 1 must render the error symbol, got: {r}");
+        assert!(
+            r.contains("C-ERR"),
+            "status 1 must render the error symbol, got: {r}"
+        );
         let (_, e) = lru.pop_entry(&key).unwrap();
         assert_eq!(e.status_code, 1, "cached status must be refreshed");
     }
@@ -97,11 +109,14 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let key = compute_cache_key(cwd.path(), "", 120, 0, 0);
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
-        lru.put(key.clone(), CachedValue {
-            rendered: "SEEDED".to_string(),
-            time_bucket: current_minute() - 1,
-            status_code: 0,
-        });
+        lru.put(
+            key.clone(),
+            CachedValue {
+                rendered: "SEEDED".to_string(),
+                time_bucket: current_minute() - 1,
+                status_code: 0,
+            },
+        );
         let r = render_cached(&ctx(cwd.path(), 0), None, &cfg(), &key, &mut lru);
         assert_ne!(r, "SEEDED", "stale time bucket must miss the cache");
         let (_, e) = lru.pop_entry(&key).unwrap();

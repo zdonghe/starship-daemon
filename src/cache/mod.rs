@@ -22,16 +22,27 @@ pub struct CacheKey {
     pub watcher_version: u64,
 }
 
-pub fn compute_cache_key(cwd: &Path, keymap: &str, terminal_width: usize, config_mtime: u64, watcher_version: u64) -> CacheKey {
+pub fn compute_cache_key(
+    cwd: &Path,
+    keymap: &str,
+    terminal_width: usize,
+    config_mtime: u64,
+    watcher_version: u64,
+) -> CacheKey {
     CacheKey {
-        cwd: cwd.to_path_buf(), keymap: keymap.to_string(), terminal_width,
-        config_mtime, watcher_version,
+        cwd: cwd.to_path_buf(),
+        keymap: keymap.to_string(),
+        terminal_width,
+        config_mtime,
+        watcher_version,
     }
 }
 
 pub fn current_minute() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() / 60).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 60)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -56,8 +67,11 @@ mod tests {
     fn compute_cache_key_all_fields() {
         let k = compute_cache_key(Path::new("/home/user"), "emacs", 100, 7, 3);
         let expected = CacheKey {
-            cwd: PathBuf::from("/home/user"), keymap: "emacs".into(),
-            terminal_width: 100, config_mtime: 7, watcher_version: 3,
+            cwd: PathBuf::from("/home/user"),
+            keymap: "emacs".into(),
+            terminal_width: 100,
+            config_mtime: 7,
+            watcher_version: 3,
         };
         assert_eq!(k, expected, "struct comparison catches swapped-field bugs");
     }

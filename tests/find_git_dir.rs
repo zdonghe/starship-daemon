@@ -9,7 +9,9 @@ fn init_temp_repo() -> (tempfile::TempDir, PathBuf) {
     let repo = dir.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     let out = Command::new("git")
-        .args(["init"]).current_dir(&repo).output()
+        .args(["init"])
+        .current_dir(&repo)
+        .output()
         .expect("git init failed");
     assert!(out.status.success());
     settle();
@@ -56,8 +58,13 @@ fn find_git_dir_no_repo() {
 
 fn has_dot_git_ancestor(mut p: &Path) -> bool {
     for _ in 0..32 {
-        if p.join(".git").exists() { return true; }
-        p = match p.parent() { Some(parent) => parent, None => return false };
+        if p.join(".git").exists() {
+            return true;
+        }
+        p = match p.parent() {
+            Some(parent) => parent,
+            None => return false,
+        };
     }
     false
 }

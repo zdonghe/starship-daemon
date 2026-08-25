@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use lru::LruCache;
 
+use crate::ParsedRequest;
 use crate::cache::{self, CacheKey};
 use crate::render::{
     BustDir, CachedValue, RenderContext, clear_repo_cache, render_cached, render_prompt_with_config,
 };
 use crate::watch::WatcherState;
-use crate::ParsedRequest;
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -31,7 +31,13 @@ impl DaemonState {
         let cached_config = cache::read_config(&config_path);
         let last_cfg_mtime = cache::get_mtime_ns(&config_path);
         let lru = LruCache::new(std::num::NonZeroUsize::new(256).unwrap());
-        Ok(DaemonState { config_path, cached_config, last_cfg_mtime, lru, watcher: WatcherState::new() })
+        Ok(DaemonState {
+            config_path,
+            cached_config,
+            last_cfg_mtime,
+            lru,
+            watcher: WatcherState::new(),
+        })
     }
 
     pub fn warm_up(&mut self) {
@@ -42,7 +48,13 @@ impl DaemonState {
             keymap: "vi".to_string(),
         };
         let warm_key = cache::compute_cache_key(Path::new("."), "vi", 120, 0, 0);
-        let _ = render_cached(&warm_ctx, None, &self.cached_config, &warm_key, &mut self.lru);
+        let _ = render_cached(
+            &warm_ctx,
+            None,
+            &self.cached_config,
+            &warm_key,
+            &mut self.lru,
+        );
     }
 
     pub fn reload_config(&mut self) {
@@ -58,26 +70,38 @@ impl DaemonState {
             None => return Err(DaemonError::BadFrame),
         };
 
-        let cwd = if cwd.as_os_str().is_empty() { PathBuf::from(".") } else { cwd };
+        let cwd = if cwd.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            cwd
+        };
         let git_dir = crate::find_git_dir(&cwd);
         let status_code = props.status_code;
         let keymap = props.keymap.unwrap_or_else(|| "vi".to_string());
         let config_mtime = self.sync_config(props.starship_config.as_deref());
-        let ctx = RenderContext { cwd: cwd.clone(), terminal_width: props.terminal_width, status_code, keymap };
-        let output = self.render_prompt(&ctx, git_dir.as_deref(), props.disable_cache, config_mtime);
+        let ctx = RenderContext {
+            cwd: cwd.clone(),
+            terminal_width: props.terminal_width,
+            status_code,
+            keymap,
+        };
+        let output =
+            self.render_prompt(&ctx, git_dir.as_deref(), props.disable_cache, config_mtime);
         Ok(output)
     }
 
     fn sync_config(&mut self, requested: Option<&str>) -> u64 {
         if let Some(req) = requested {
             let p = Path::new(req);
-            if p != self.config_path.as_path() {
-                if let Some(new_cfg) = cache::load_config(p) {
-                    self.config_path = new_cfg;
-                    unsafe { std::env::set_var("STARSHIP_CONFIG", req); }
-                    self.reload_config();
-                    return self.last_cfg_mtime;
+            if p != self.config_path.as_path()
+                && let Some(new_cfg) = cache::load_config(p)
+            {
+                self.config_path = new_cfg;
+                unsafe {
+                    std::env::set_var("STARSHIP_CONFIG", req);
                 }
+                self.reload_config();
+                return self.last_cfg_mtime;
             }
         }
         let mtime = cache::get_mtime_ns(&self.config_path);
@@ -87,7 +111,13 @@ impl DaemonState {
         mtime
     }
 
-    fn render_prompt(&mut self, ctx: &RenderContext, git_dir: Option<&Path>, disable_cache: bool, config_mtime: u64) -> String {
+    fn render_prompt(
+        &mut self,
+        ctx: &RenderContext,
+        git_dir: Option<&Path>,
+        disable_cache: bool,
+        config_mtime: u64,
+    ) -> String {
         if disable_cache {
             return render_prompt_with_config(ctx, git_dir, &self.cached_config, BustDir::Fresh);
         }
@@ -98,7 +128,13 @@ impl DaemonState {
         } else {
             0
         };
-        let key = cache::compute_cache_key(&ctx.cwd, &ctx.keymap, ctx.terminal_width, config_mtime, watcher_version);
+        let key = cache::compute_cache_key(
+            &ctx.cwd,
+            &ctx.keymap,
+            ctx.terminal_width,
+            config_mtime,
+            watcher_version,
+        );
         render_cached(ctx, git_dir, &self.cached_config, &key, &mut self.lru)
     }
 }
@@ -121,13 +157,22 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.0 {
-                Some(p) => unsafe { std::env::set_var("STARSHIP_CONFIG", p); },
+                Some(p) => unsafe {
+                    std::env::set_var("STARSHIP_CONFIG", p);
+                },
                 None => unsafe { std::env::remove_var("STARSHIP_CONFIG") },
             }
         }
     }
 
-    fn frame(cwd: &str, status: i32, keymap: &str, width: u32, config: Option<&str>, disable: bool) -> Vec<u8> {
+    fn frame(
+        cwd: &str,
+        status: i32,
+        keymap: &str,
+        width: u32,
+        config: Option<&str>,
+        disable: bool,
+    ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&(cwd.len() as u32).to_le_bytes());
         body.extend_from_slice(cwd.as_bytes());
@@ -152,9 +197,13 @@ mod tests {
 
     fn char_config(dir: &tempfile::TempDir, symbol: &str) -> PathBuf {
         let p = dir.path().join("starship.toml");
-        std::fs::write(&p, format!(
-            "format = \"$character\"\nadd_newline = false\n[character]\nformat = \"{symbol}\"\n"
-        )).unwrap();
+        std::fs::write(
+            &p,
+            format!(
+                "format = \"$character\"\nadd_newline = false\n[character]\nformat = \"{symbol}\"\n"
+            ),
+        )
+        .unwrap();
         p
     }
 
@@ -166,7 +215,10 @@ mod tests {
 
     #[test]
     fn new_missing_config_is_error() {
-        assert!(matches!(DaemonState::new(PathBuf::from("__nonexistent__")), Err(DaemonError::ConfigNotFound)));
+        assert!(matches!(
+            DaemonState::new(PathBuf::from("__nonexistent__")),
+            Err(DaemonError::ConfigNotFound)
+        ));
     }
 
     #[test]
@@ -205,7 +257,11 @@ mod tests {
         let m0 = crate::cache::get_mtime_ns(&cfg);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            std::fs::write(&cfg, "format = \"$character\"\nadd_newline = false\n[character]\nformat = \"x\"\n").unwrap();
+            std::fs::write(
+                &cfg,
+                "format = \"$character\"\nadd_newline = false\n[character]\nformat = \"x\"\n",
+            )
+            .unwrap();
             if crate::cache::get_mtime_ns(&cfg) != m0 {
                 break;
             }
@@ -221,14 +277,30 @@ mod tests {
         let cwd = work_dir(&dir);
         let cfg_a = char_config(&dir, ">");
         let cfg_b = dir.path().join("other.toml");
-        std::fs::write(&cfg_b, "format = \"$character\"\nadd_newline = false\n[character]\nformat = \"x\"\n").unwrap();
+        std::fs::write(
+            &cfg_b,
+            "format = \"$character\"\nadd_newline = false\n[character]\nformat = \"x\"\n",
+        )
+        .unwrap();
 
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _env = EnvGuard::new();
         let mut d = DaemonState::new(cfg_a).unwrap();
-        let req = frame(&cwd.to_string_lossy(), 0, "", 120, Some(&cfg_b.to_string_lossy()), false);
+        let req = frame(
+            &cwd.to_string_lossy(),
+            0,
+            "",
+            120,
+            Some(&cfg_b.to_string_lossy()),
+            false,
+        );
         assert_eq!(d.handle(&req).unwrap(), "x");
-        assert_eq!(std::env::var("STARSHIP_CONFIG").unwrap(), cfg_b.to_string_lossy());
+        assert_eq!(
+            std::env::var("STARSHIP_CONFIG").unwrap(),
+            cfg_b.to_string_lossy()
+        );
     }
 
     #[test]
@@ -248,20 +320,31 @@ mod tests {
 
         fn git_cmd(repo: &std::path::Path, args: &[&str]) {
             let out = std::process::Command::new("git")
-                .arg("-C").arg(repo)
+                .arg("-C")
+                .arg(repo)
                 .args(args)
                 .output()
                 .expect("git command failed");
-            assert!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         fn wait_for_bump(w: &mut WatcherState, repo: &std::path::Path, before: u64) {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 w.poll();
-                if w.version(repo) > before { return; }
+                if w.version(repo) > before {
+                    return;
+                }
                 std::thread::sleep(Duration::from_millis(20));
-                assert!(Instant::now() < deadline, "repo version did not bump within 5s");
+                assert!(
+                    Instant::now() < deadline,
+                    "repo version did not bump within 5s"
+                );
             }
         }
 
@@ -291,34 +374,53 @@ mod tests {
 
             let cached = d.lru.len();
             assert_eq!(d.handle(&req).unwrap(), "other");
-            assert!(d.lru.len() > cached, "watcher version change must bust the cache key");
+            assert!(
+                d.lru.len() > cached,
+                "watcher version change must bust the cache key"
+            );
         }
 
         fn status_cfg(dir: &tempfile::TempDir) -> PathBuf {
             let p = dir.path().join("starship.toml");
-            std::fs::write(&p, "\
+            std::fs::write(
+                &p,
+                "\
     format = \"$git_status\"
     add_newline = false
     [git_status]
-    format = \"$conflicted$stashed$deleted$renamed$modified$staged$untracked\"\n").unwrap();
+    format = \"$conflicted$stashed$deleted$renamed$modified$staged$untracked\"\n",
+            )
+            .unwrap();
             p
         }
 
         fn std_config(dir: &tempfile::TempDir) -> PathBuf {
             let p = dir.path().join("starship.toml");
-            std::fs::write(&p, "\
+            std::fs::write(
+                &p,
+                "\
     format = \"$git_status\"
     add_newline = false
     [git_status]
-    format = \"$modified$untracked\"\n").unwrap();
+    format = \"$modified$untracked\"\n",
+            )
+            .unwrap();
             p
         }
 
-        fn wait_status(d: &mut DaemonState, repo: &std::path::Path, req: &[u8], before: &str) -> String {
+        fn wait_status(
+            d: &mut DaemonState,
+            repo: &std::path::Path,
+            req: &[u8],
+            before: &str,
+        ) -> String {
             let before_ver = d.watcher.version(repo);
             wait_for_bump(&mut d.watcher, repo, before_ver);
             let out = d.handle(req).unwrap();
-            assert_ne!(out, before, "status must update in real time after repo change");
+            assert_ne!(
+                out, before,
+                "status must update in real time after repo change"
+            );
             out
         }
 
@@ -339,15 +441,24 @@ mod tests {
             let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
 
             let out_clean = d.handle(&req).unwrap();
-            assert!(!out_clean.contains('!'), "clean tree must show no modifications: {out_clean:?}");
+            assert!(
+                !out_clean.contains('!'),
+                "clean tree must show no modifications: {out_clean:?}"
+            );
 
             std::fs::write(repo.join("a.txt"), "hello world").unwrap();
             let out_mod = wait_status(&mut d, &repo, &req, &out_clean);
-            assert!(out_mod.contains('!'), "tracked edit must show modified symbol, got {out_mod:?}");
+            assert!(
+                out_mod.contains('!'),
+                "tracked edit must show modified symbol, got {out_mod:?}"
+            );
 
             git_cmd(&repo, &["checkout", "--", "a.txt"]);
             let out_restored = wait_status(&mut d, &repo, &req, &out_mod);
-            assert!(!out_restored.contains('!'), "restore must clear modified, got {out_restored:?}");
+            assert!(
+                !out_restored.contains('!'),
+                "restore must clear modified, got {out_restored:?}"
+            );
         }
 
         #[test]
@@ -366,11 +477,17 @@ mod tests {
             let mut d = DaemonState::new(cfg).unwrap();
             let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
             let out_clean = d.handle(&req).unwrap();
-            assert!(!out_clean.contains('?'), "clean tree must not show untracked, got {out_clean:?}");
+            assert!(
+                !out_clean.contains('?'),
+                "clean tree must not show untracked, got {out_clean:?}"
+            );
 
             std::fs::write(repo.join("new.txt"), "x").unwrap();
             let out = wait_status(&mut d, &repo, &req, &out_clean);
-            assert!(out.contains('?'), "untracked file must show ? in real time, got {out:?}");
+            assert!(
+                out.contains('?'),
+                "untracked file must show ? in real time, got {out:?}"
+            );
         }
 
         #[test]
@@ -389,13 +506,19 @@ mod tests {
             let mut d = DaemonState::new(cfg.clone()).unwrap();
             let req = frame(&repo.to_string_lossy(), 0, "", 120, None, false);
             let out_clean = d.handle(&req).unwrap();
-            assert!(!out_clean.contains('$'), "no stash expected, got {out_clean:?}");
+            assert!(
+                !out_clean.contains('$'),
+                "no stash expected, got {out_clean:?}"
+            );
 
             std::fs::write(repo.join("a.txt"), "dirty").unwrap();
             git_cmd(&repo, &["stash"]);
             std::thread::sleep(std::time::Duration::from_millis(15));
             let t = wait_status(&mut d, &repo, &req, &out_clean);
-            assert!(t.contains('$'), "stash must show $ symbol in real time, got {t:?}");
+            assert!(
+                t.contains('$'),
+                "stash must show $ symbol in real time, got {t:?}"
+            );
         }
 
         #[test]
@@ -430,8 +553,18 @@ mod tests {
         let cfg = char_config(&dir, ">");
         let mut d = DaemonState::new(cfg.clone()).unwrap();
         let bogus = dir.path().join("bogus.toml");
-        let req = frame(&cwd.to_string_lossy(), 0, "", 120, Some(&bogus.to_string_lossy()), false);
+        let req = frame(
+            &cwd.to_string_lossy(),
+            0,
+            "",
+            120,
+            Some(&bogus.to_string_lossy()),
+            false,
+        );
         assert_eq!(d.handle(&req).unwrap(), ">");
-        assert_eq!(d.config_path, cfg, "unloadable explicit config must keep the current one");
+        assert_eq!(
+            d.config_path, cfg,
+            "unloadable explicit config must keep the current one"
+        );
     }
 }

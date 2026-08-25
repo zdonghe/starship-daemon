@@ -45,13 +45,28 @@ fn zero_watcher_version_stays_fresh_across_cds() {
     };
     let key = |cwd: &std::path::Path| cache::compute_cache_key(cwd, "vi", 120, 0, 0);
 
-    let out1 = render::render_cached(&ctx(repo.to_path_buf()), git_dir.as_deref(), &cfg, &key(repo), &mut lru);
+    let out1 = render::render_cached(
+        &ctx(repo.to_path_buf()),
+        git_dir.as_deref(),
+        &cfg,
+        &key(repo),
+        &mut lru,
+    );
 
     std::fs::write(repo.join("untracked.txt"), "new").unwrap();
     std::thread::sleep(SETTLE);
 
     let sub = repo.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    let out2 = render::render_cached(&ctx(sub.clone()), git_dir.as_deref(), &cfg, &key(&sub), &mut lru);
-    assert_ne!(out1, out2, "watcher_version 0 must never pin stale git status across renders");
+    let out2 = render::render_cached(
+        &ctx(sub.clone()),
+        git_dir.as_deref(),
+        &cfg,
+        &key(&sub),
+        &mut lru,
+    );
+    assert_ne!(
+        out1, out2,
+        "watcher_version 0 must never pin stale git status across renders"
+    );
 }

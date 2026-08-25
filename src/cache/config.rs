@@ -4,7 +4,10 @@ pub fn load_config(path: &Path) -> Option<PathBuf> {
     path.is_file().then(|| path.to_path_buf())
 }
 
-pub(crate) fn config_path_from_env(config_var: Option<String>, home_dir: Option<String>) -> PathBuf {
+pub(crate) fn config_path_from_env(
+    config_var: Option<String>,
+    home_dir: Option<String>,
+) -> PathBuf {
     if let Some(cfg) = config_var {
         return PathBuf::from(cfg);
     }
@@ -82,7 +85,10 @@ mod tests {
     fn config_path_from_env_config_var_wins_over_home_dir() {
         let cfg = Some("C:\\custom\\starship.toml".to_string());
         let home = Some("C:\\Users\\me".to_string());
-        assert_eq!(config_path_from_env(cfg, home), PathBuf::from("C:\\custom\\starship.toml"));
+        assert_eq!(
+            config_path_from_env(cfg, home),
+            PathBuf::from("C:\\custom\\starship.toml")
+        );
     }
 
     #[test]

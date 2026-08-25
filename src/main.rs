@@ -10,8 +10,15 @@ use starship_daemon::daemon::DaemonState;
 use starship_daemon::watch::{STATS_ENABLED, drain_stats};
 
 fn main() {
-    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
-        let variant = if cfg!(feature = "fork") { "fork" } else { "stock" };
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        let variant = if cfg!(feature = "fork") {
+            "fork"
+        } else {
+            "stock"
+        };
         println!("starship-daemon {} ({variant})", env!("CARGO_PKG_VERSION"));
         return;
     }
@@ -39,8 +46,10 @@ fn main() {
 #[cfg(debug_assertions)]
 fn start_stats_reporter() {
     STATS_ENABLED.store(true, Ordering::Relaxed);
-    std::thread::spawn(|| loop {
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        eprintln!("[watcher-stats]\n{}", drain_stats());
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            eprintln!("[watcher-stats]\n{}", drain_stats());
+        }
     });
 }

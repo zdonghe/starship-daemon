@@ -38,9 +38,18 @@ pub struct ProcessPowerThrottlingState {
 
 pub fn disable_power_throttling() {
     unsafe {
-        let state = ProcessPowerThrottlingState { version: 1, control_mask: 0x1, state_mask: 0 };
+        let state = ProcessPowerThrottlingState {
+            version: 1,
+            control_mask: 0x1,
+            state_mask: 0,
+        };
         let ptr = &state as *const ProcessPowerThrottlingState as *mut c_void;
-        let _ = SetProcessInformation(INVALID_HANDLE_VALUE, 4, ptr, std::mem::size_of::<ProcessPowerThrottlingState>() as u32);
+        let _ = SetProcessInformation(
+            INVALID_HANDLE_VALUE,
+            4,
+            ptr,
+            std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
+        );
     }
 }
 
@@ -50,7 +59,10 @@ pub fn to_wide(s: &str) -> Vec<u16> {
 
 pub fn to_wide_path(p: &std::path::Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 unsafe extern "system" {
@@ -58,20 +70,80 @@ unsafe extern "system" {
     pub fn CloseHandle(h: HANDLE) -> BOOL;
     pub fn ResetEvent(h: HANDLE) -> BOOL;
     pub fn SetEvent(h: HANDLE) -> BOOL;
-    pub fn CreateFileW(name: LPCWSTR, access: DWORD, share: DWORD, sec: *const c_void, disp: DWORD, flags: DWORD, tmpl: HANDLE) -> HANDLE;
-    pub fn ReadDirectoryChangesW(dir: HANDLE, buf: LPVOID, len: DWORD, subtree: BOOL, filter: DWORD, bytes: LPDWORD, overlapped: *mut c_void, comp: *const c_void) -> BOOL;
-    pub fn GetOverlappedResult(h: HANDLE, overlapped: *mut c_void, bytes: LPDWORD, wait: BOOL) -> BOOL;
-    pub fn CreateNamedPipeW(name: LPCWSTR, open_mode: DWORD, pipe_mode: DWORD, max_inst: DWORD, out_buf: DWORD, in_buf: DWORD, timeout: DWORD, sec: *const c_void) -> HANDLE;
+    pub fn CreateFileW(
+        name: LPCWSTR,
+        access: DWORD,
+        share: DWORD,
+        sec: *const c_void,
+        disp: DWORD,
+        flags: DWORD,
+        tmpl: HANDLE,
+    ) -> HANDLE;
+    pub fn ReadDirectoryChangesW(
+        dir: HANDLE,
+        buf: LPVOID,
+        len: DWORD,
+        subtree: BOOL,
+        filter: DWORD,
+        bytes: LPDWORD,
+        overlapped: *mut c_void,
+        comp: *const c_void,
+    ) -> BOOL;
+    pub fn GetOverlappedResult(
+        h: HANDLE,
+        overlapped: *mut c_void,
+        bytes: LPDWORD,
+        wait: BOOL,
+    ) -> BOOL;
+    pub fn CreateNamedPipeW(
+        name: LPCWSTR,
+        open_mode: DWORD,
+        pipe_mode: DWORD,
+        max_inst: DWORD,
+        out_buf: DWORD,
+        in_buf: DWORD,
+        timeout: DWORD,
+        sec: *const c_void,
+    ) -> HANDLE;
     pub fn ConnectNamedPipe(h: HANDLE, overlapped: *mut c_void) -> BOOL;
     pub fn DisconnectNamedPipe(h: HANDLE) -> BOOL;
-    pub fn ReadFile(h: HANDLE, buf: LPVOID, len: DWORD, read: LPDWORD, overlapped: *mut c_void) -> BOOL;
-    pub fn WriteFile(h: HANDLE, buf: LPCVOID, len: DWORD, written: LPDWORD, overlapped: *mut c_void) -> BOOL;
-    pub fn WaitForMultipleObjects(count: DWORD, handles: *const HANDLE, wait_all: BOOL, ms: DWORD) -> DWORD;
+    pub fn ReadFile(
+        h: HANDLE,
+        buf: LPVOID,
+        len: DWORD,
+        read: LPDWORD,
+        overlapped: *mut c_void,
+    ) -> BOOL;
+    pub fn WriteFile(
+        h: HANDLE,
+        buf: LPCVOID,
+        len: DWORD,
+        written: LPDWORD,
+        overlapped: *mut c_void,
+    ) -> BOOL;
+    pub fn WaitForMultipleObjects(
+        count: DWORD,
+        handles: *const HANDLE,
+        wait_all: BOOL,
+        ms: DWORD,
+    ) -> DWORD;
     pub fn WaitForSingleObject(handle: HANDLE, ms: DWORD) -> DWORD;
     pub fn GetLastError() -> DWORD;
     pub fn FlushFileBuffers(h: HANDLE) -> BOOL;
-    pub fn PeekNamedPipe(h: HANDLE, buf: LPVOID, buf_size: DWORD, bytes_read: LPDWORD, total_avail: LPDWORD, bytes_left: LPDWORD) -> BOOL;
+    pub fn PeekNamedPipe(
+        h: HANDLE,
+        buf: LPVOID,
+        buf_size: DWORD,
+        bytes_read: LPDWORD,
+        total_avail: LPDWORD,
+        bytes_left: LPDWORD,
+    ) -> BOOL;
     pub fn CancelIoEx(h: HANDLE, overlapped: *mut c_void) -> BOOL;
-    pub fn SetNamedPipeHandleState(h: HANDLE, mode: LPDWORD, max_collect: LPDWORD, timeout: LPDWORD) -> BOOL;
+    pub fn SetNamedPipeHandleState(
+        h: HANDLE,
+        mode: LPDWORD,
+        max_collect: LPDWORD,
+        timeout: LPDWORD,
+    ) -> BOOL;
     pub fn SetProcessInformation(proc_: HANDLE, class: DWORD, info: LPVOID, size: DWORD) -> BOOL;
 }

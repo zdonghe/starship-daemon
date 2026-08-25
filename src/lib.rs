@@ -14,7 +14,7 @@ compile_error!(
 
 #[cfg(not(any(feature = "stock", feature = "fork")))]
 compile_error!(
-    "one of the `stock` or `fork` features is required (default is `stock`); build the fork variant with `cargo build --no-default-features --features fork`"
+    "one of the `stock` or `fork` features is required (default is `fork`); build the stock variant with `cargo build --no-default-features --features stock`"
 );
 
 pub const PIPE_NAME: &str = r"\\.\pipe\starship-daemon";
@@ -29,6 +29,12 @@ pub fn pipe_name() -> String {
             }
         })
         .unwrap_or_else(|_| PIPE_NAME.to_string())
+}
+
+pub fn debug_enabled() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("STARSHIP_DAEMON_DEBUG").as_deref() == Ok("1"));
+    *ENABLED
 }
 
 pub mod cache;
@@ -95,8 +101,11 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
 // satisfy 5 + total_len <= 65536, i.e. total_len <= 65531. An unknown request
 // type, an over-cap field, or a field reading past the body returns None; the
 // daemon then drops the connection and the client falls back to its plain prompt.
-pub const PROTO_VERSION: u8 = 1;
-pub const REQ_PROMPT: u8 = PROTO_VERSION;
+// Request type bytes. Deliberately independent constants: there is no
+// protocol version negotiation anywhere - byte 0 of every request is a
+// request TYPE. Coupling these to a "version" would silently break old
+// clients if the values were ever bumped.
+pub const REQ_PROMPT: u8 = 1;
 pub const REQ_TIMINGS: u8 = 2;
 pub const HEADER_LEN: usize = 5;
 pub const MAX_FRAME_LEN: usize = 65536;
@@ -196,6 +205,41 @@ pub fn parse_request(data: &[u8]) -> Option<ParsedRequest> {
     })
 }
 
+pub fn encode_request(
+    kind: u8,
+    cwd: &str,
+    status: i32,
+    keymap: &str,
+    width: u32,
+    config: Option<&str>,
+    disable: bool,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    let cwd_b = cwd.as_bytes();
+    body.extend_from_slice(&(cwd_b.len() as u32).to_le_bytes());
+    body.extend_from_slice(cwd_b);
+    body.extend_from_slice(&status.to_le_bytes());
+    let keymap_b = keymap.as_bytes();
+    body.extend_from_slice(&(keymap_b.len() as u16).to_le_bytes());
+    body.extend_from_slice(keymap_b);
+    body.extend_from_slice(&width.to_le_bytes());
+    match config {
+        Some(c) => {
+            let config_b = c.as_bytes();
+            body.extend_from_slice(&(config_b.len() as u16).to_le_bytes());
+            body.extend_from_slice(config_b);
+        }
+        None => body.extend_from_slice(&0u16.to_le_bytes()),
+    }
+    body.push(disable as u8);
+
+    let mut out = Vec::with_capacity(HEADER_LEN + body.len());
+    out.push(kind);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
 fn read_slice<'a>(body: &'a [u8], off: &mut usize, n: usize) -> Option<&'a [u8]> {
     if *off + n > body.len() {
         return None;
@@ -262,7 +306,7 @@ mod tests {
         disable: bool,
     ) -> Vec<u8> {
         let body = encode_body(cwd, status, keymap, width, config, disable);
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(body.len() as u32).to_le_bytes());
         data.extend_from_slice(&body);
         data
@@ -326,7 +370,7 @@ mod tests {
     fn parse_request_empty_data() {
         assert!(parse_request(&[]).is_none());
         assert!(parse_request(&[0u8; 5]).is_none());
-        assert!(parse_request(&[PROTO_VERSION, 0, 0, 0, 0]).is_none());
+        assert!(parse_request(&[REQ_PROMPT, 0, 0, 0, 0]).is_none());
     }
 
     #[test]
@@ -360,14 +404,14 @@ mod tests {
 
     #[test]
     fn parse_request_total_len_over_cap() {
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(MAX_TOTAL_LEN as u32 + 1).to_le_bytes());
         assert!(parse_request(&data).is_none());
     }
 
     #[test]
     fn parse_request_total_len_exact_cap_missing_body() {
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(MAX_TOTAL_LEN as u32).to_le_bytes());
         assert!(parse_request(&data).is_none());
     }
@@ -397,7 +441,7 @@ mod tests {
 
     #[test]
     fn parse_request_cwd_len_overrun() {
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
         data.extend_from_slice(&100u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
@@ -411,7 +455,7 @@ mod tests {
     #[test]
     fn parse_request_cwd_len_too_big() {
         let body_len = FIXED_BODY_LEN + MAX_CWD_LEN + 1;
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(body_len as u32).to_le_bytes());
         data.extend_from_slice(&((MAX_CWD_LEN + 1) as u32).to_le_bytes());
         data.resize(HEADER_LEN + body_len, 0);
@@ -420,7 +464,7 @@ mod tests {
 
     #[test]
     fn parse_request_keymap_overrun() {
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
@@ -433,7 +477,7 @@ mod tests {
 
     #[test]
     fn parse_request_config_overrun() {
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
@@ -447,7 +491,7 @@ mod tests {
     #[test]
     fn parse_request_cwd_eats_tail_never_panics() {
         for cwd_len in 1..=13usize {
-            let mut data = vec![PROTO_VERSION];
+            let mut data = vec![REQ_PROMPT];
             data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
             data.extend_from_slice(&(cwd_len as u32).to_le_bytes());
             data.resize(HEADER_LEN + FIXED_BODY_LEN, 0);
@@ -457,7 +501,7 @@ mod tests {
             );
         }
 
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(FIXED_BODY_LEN as u32).to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
@@ -465,7 +509,7 @@ mod tests {
         data.resize(HEADER_LEN + FIXED_BODY_LEN, 0);
         assert!(parse_request(&data).is_none());
 
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&19u32.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
@@ -542,7 +586,7 @@ mod tests {
         let keymap_b = [0xffu8, 0xfe];
         let config_b = [0x80u8, 0x81];
         let body_len = FIXED_BODY_LEN + keymap_b.len() + config_b.len();
-        let mut data = vec![PROTO_VERSION];
+        let mut data = vec![REQ_PROMPT];
         data.extend_from_slice(&(body_len as u32).to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes());
@@ -555,5 +599,42 @@ mod tests {
         let req = parse_request(&data).unwrap();
         assert!(req.props.keymap.is_some());
         assert!(req.props.starship_config.is_some());
+    }
+
+    #[test]
+    fn encode_request_matches_reference_and_roundtrips() {
+        assert_eq!(
+            encode_request(REQ_PROMPT, "/repo", -3, "vi", 120, Some("cfg"), true),
+            encode_request_v1("/repo", -3, Some("vi"), 120, Some("cfg"), true)
+        );
+        assert_eq!(
+            encode_request(REQ_PROMPT, "", 0, "", 0, None, false),
+            encode_request_v1("", 0, None, 0, None, false)
+        );
+        assert_eq!(
+            encode_request(REQ_PROMPT, "/repo/日本語", 0, "", 0, None, false),
+            encode_request_v1("/repo/日本語", 0, None, 0, None, false)
+        );
+
+        for (kind, expected) in [
+            (REQ_PROMPT, RequestKind::Prompt),
+            (REQ_TIMINGS, RequestKind::Timings),
+        ] {
+            let built = encode_request(kind, "/repo/日本語", -3, "vi", 120, Some("cfg"), true);
+            assert_eq!(built[0], kind);
+            let req = parse_request(&built).unwrap();
+            assert_eq!(req.kind, expected);
+            assert_eq!(req.cwd, PathBuf::from("/repo/日本語"));
+            assert_eq!(
+                decode(&req),
+                (
+                    -3,
+                    Some("vi".to_string()),
+                    120,
+                    Some("cfg".to_string()),
+                    true
+                )
+            );
+        }
     }
 }

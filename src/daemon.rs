@@ -179,26 +179,15 @@ mod tests {
         config: Option<&str>,
         disable: bool,
     ) -> Vec<u8> {
-        let mut body = Vec::new();
-        body.extend_from_slice(&(cwd.len() as u32).to_le_bytes());
-        body.extend_from_slice(cwd.as_bytes());
-        body.extend_from_slice(&status.to_le_bytes());
-        body.extend_from_slice(&(keymap.len() as u16).to_le_bytes());
-        body.extend_from_slice(keymap.as_bytes());
-        body.extend_from_slice(&width.to_le_bytes());
-        match config {
-            Some(c) => {
-                body.extend_from_slice(&(c.len() as u16).to_le_bytes());
-                body.extend_from_slice(c.as_bytes());
-            }
-            None => body.extend_from_slice(&0u16.to_le_bytes()),
-        }
-        body.push(disable as u8);
-        let mut out = Vec::new();
-        out.push(crate::PROTO_VERSION);
-        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        out.extend_from_slice(&body);
-        out
+        crate::encode_request(
+            crate::REQ_PROMPT,
+            cwd,
+            status,
+            keymap,
+            width,
+            config,
+            disable,
+        )
     }
 
     fn char_config(dir: &tempfile::TempDir, symbol: &str) -> PathBuf {
@@ -318,6 +307,127 @@ mod tests {
         let req = frame(&cwd.to_string_lossy(), 0, "", 120, None, true);
         assert_eq!(d.handle(&req).unwrap(), ">");
         assert_eq!(d.lru.len(), 0, "disable_cache must bypass the render cache");
+    }
+
+    #[test]
+    fn lru_capacity_evicts_and_hit_promotes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = char_config(&dir, ">");
+        let mut d = DaemonState {
+            config_path: cfg.clone(),
+            cached_config: cache::read_config(&cfg),
+            last_cfg_mtime: cache::get_mtime_ns(&cfg),
+            lru: LruCache::new(std::num::NonZeroUsize::new(2).unwrap()),
+            watcher: WatcherState::new(),
+        };
+        let cwda = dir.path().join("a").to_string_lossy().to_string();
+        let cwdb = dir.path().join("b").to_string_lossy().to_string();
+        let cwdc = dir.path().join("c").to_string_lossy().to_string();
+        let fa = frame(&cwda, 0, "", 120, None, false);
+        let fb = frame(&cwdb, 0, "", 120, None, false);
+        let fc = frame(&cwdc, 0, "", 120, None, false);
+
+        assert_eq!(d.handle(&fa).unwrap(), ">");
+        assert_eq!(d.handle(&fb).unwrap(), ">");
+        assert_eq!(d.lru.len(), 2);
+
+        assert_eq!(d.handle(&fa).unwrap(), ">");
+        assert_eq!(d.handle(&fc).unwrap(), ">");
+        assert_eq!(d.lru.len(), 2);
+
+        let key_a =
+            cache::compute_cache_key(std::path::Path::new(&cwda), "vi", 120, d.last_cfg_mtime, 0);
+        assert!(
+            d.lru.peek(&key_a).is_some(),
+            "promoted entry must survive the eviction"
+        );
+        assert_eq!(
+            d.handle(&fb).unwrap(),
+            ">",
+            "evicted cwd must re-render correctly"
+        );
+    }
+
+    #[test]
+    fn reload_config_clears_lru() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = char_config(&dir, ">");
+        let mut d = DaemonState::new(cfg).unwrap();
+        let req = frame(&work_dir(&dir).to_string_lossy(), 0, "", 120, None, false);
+        assert_eq!(d.handle(&req).unwrap(), ">");
+        assert_eq!(d.lru.len(), 1);
+        d.reload_config();
+        assert!(
+            d.lru.is_empty(),
+            "reload_config must clear the render cache"
+        );
+    }
+
+    #[test]
+    fn warm_up_seeds_exactly_the_default_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = char_config(&dir, ">");
+        let mut d = DaemonState {
+            config_path: cfg.clone(),
+            cached_config: cache::read_config(&cfg),
+            last_cfg_mtime: cache::get_mtime_ns(&cfg),
+            lru: LruCache::new(std::num::NonZeroUsize::new(4).unwrap()),
+            watcher: WatcherState::new(),
+        };
+        d.warm_up();
+        assert_eq!(d.lru.len(), 1);
+        let expected = cache::compute_cache_key(std::path::Path::new("."), "vi", 120, 0, 0);
+        assert!(
+            d.lru.contains(&expected),
+            "warm_up must seed exactly the default-frame key"
+        );
+    }
+
+    #[test]
+    fn disable_cache_leaves_existing_entries_intact() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = char_config(&dir, ">");
+        let mut d = DaemonState::new(cfg).unwrap();
+        let cwd = work_dir(&dir);
+        let req = frame(&cwd.to_string_lossy(), 0, "", 120, None, false);
+        assert_eq!(d.handle(&req).unwrap(), ">");
+        assert_eq!(d.lru.len(), 1);
+        let off = frame(&cwd.to_string_lossy(), 0, "", 120, None, true);
+        assert_eq!(d.handle(&off).unwrap(), ">");
+        assert_eq!(d.lru.len(), 1, "disable path must not touch the LRU");
+        assert_eq!(d.handle(&req).unwrap(), ">");
+        assert_eq!(d.lru.len(), 1, "original entry must still be served");
+    }
+
+    #[test]
+    fn timings_report_reports_miss_then_hit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = char_config(&dir, ">");
+        let mut d = DaemonState::new(cfg).unwrap();
+        let cwd = work_dir(&dir).to_string_lossy().to_string();
+
+        let mut t1 = frame(&cwd, 0, "", 120, None, false);
+        t1[0] = crate::REQ_TIMINGS;
+        let r1 = d.handle(&t1).unwrap();
+        assert!(
+            r1.contains("cache: MISS"),
+            "fresh state must report MISS, got: {r1}"
+        );
+
+        let req = frame(&cwd, 0, "", 120, None, false);
+        assert_eq!(
+            d.handle(&req).unwrap(),
+            ">",
+            "prompt render populates the entry"
+        );
+
+        let mut t2 = frame(&cwd, 0, "", 120, None, false);
+        t2[0] = crate::REQ_TIMINGS;
+        let r2 = d.handle(&t2).unwrap();
+        assert!(
+            r2.contains("cache: HIT"),
+            "populated state must report HIT, got: {r2}"
+        );
     }
 
     #[cfg(feature = "fork")]

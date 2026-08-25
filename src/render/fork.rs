@@ -480,10 +480,6 @@ mod tests {
         assert!(r4.contains("C-OK"), "fresh-key render must work, got: {r4}");
     }
 
-    /// The segment-reuse path serves cached module segments for everything
-    /// except the live-rendered modules; its output must still be
-    /// byte-identical to what plain starship computes fresh for the same
-    /// repo state (same watcher_version guarantees the state has not moved).
     #[test]
     fn segment_reuse_output_matches_fresh_reference() {
         use crate::render::fidelity_tests::{default_cfg, reference, repo_with_commit};
@@ -502,7 +498,6 @@ mod tests {
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
         let _miss = render_cached(&ctx, None, &cfg, &key, &mut lru);
 
-        // Force the reuse path the way a minute rollover does.
         let (_, mut entry) = lru.pop_entry(&key).unwrap();
         entry.time_bucket = 0;
         lru.put(key.clone(), entry);
@@ -515,9 +510,6 @@ mod tests {
         );
     }
 
-    /// populate_cache must capture every cacheable module exactly as the
-    /// library would compute it live: rendering through a fully-populated
-    /// ModuleCache must equal rendering with an empty one (all-live).
     #[test]
     fn populated_modulecache_renders_identically_to_live() {
         let cwd = tempfile::TempDir::new().unwrap();
@@ -549,9 +541,6 @@ mod tests {
             "populated-segment render must equal all-live render"
         );
 
-        // Consumption proof: blank one cached module. If lookups regressed
-        // to live-render fallback, output would be unchanged (vacuous pass);
-        // with a working cache the directory module vanishes instead.
         segments
             .get_mut("directory")
             .expect("directory must be cached")

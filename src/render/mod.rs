@@ -149,9 +149,6 @@ pub fn render_prompt_with_config(
     trim_prompt(&result)
 }
 
-/// Shared cache-hit skeleton. On a hit (same minute bucket + same exit code)
-/// the stored rendering is served verbatim; otherwise the variant-specific
-/// miss path re-renders and repopulates the entry.
 pub fn render_cached(
     ctx: &RenderContext,
     git_dir: Option<&Path>,
@@ -286,11 +283,6 @@ mod bust_dir_tests {
     }
 }
 
-/// Differential tests: the daemon's rendered prompt must be byte-identical to
-/// what plain starship produces for the same inputs (cwd, exit code, width,
-/// shell, config table). The reference is computed by building an equivalent
-/// starship Context directly and calling `get_prompt`, bypassing every layer
-/// of daemon machinery (bust dirs, caches, config plumbing).
 #[cfg(test)]
 mod fidelity_tests {
     use std::num::NonZeroUsize;
@@ -303,7 +295,7 @@ mod fidelity_tests {
         BustDir, RenderContext, clear_repo_cache, render_cached, render_prompt_with_config,
         trim_prompt,
     };
-    use crate::cache::{compute_cache_key, current_minute};
+    use crate::cache::compute_cache_key;
 
     const WIDTH: usize = 120;
     const KEYMAP: &str = "vi";
@@ -321,9 +313,6 @@ mod fidelity_tests {
         }
     }
 
-    /// What plain starship would print standing in `cwd`: a Context built
-    /// exactly like prepare_ctx does, but with the real cwd as both
-    /// current_dir and logical_dir (no bust-directory indirection).
     fn ref_ctx(cwd: &Path, status_code: i32) -> starship::context::Context<'static> {
         let mut p = starship::context::Properties::default();
         p.status_code = Some(status_code.to_string());
@@ -362,8 +351,6 @@ mod fidelity_tests {
 
     fn git(dir: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
-            // Hermetic against the parent shell: ignore ambient git env and
-            // any global signing/hook configuration.
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(dir)
@@ -439,15 +426,16 @@ mod fidelity_tests {
         let mut lru = LruCache::new(NonZeroUsize::new(256).unwrap());
 
         let first = render_cached(&ctx, None, &cfg, &key, &mut lru);
-        let tb = current_minute();
-        let second = render_cached(&ctx, None, &cfg, &key, &mut lru);
         let want = reference(dir.path(), 0);
         assert_eq!(first, want, "miss-path output must equal the reference");
-        assert_eq!(second, want, "cache-hit output must equal the reference");
-        let entry = lru.get(&key).expect("entry must exist after render");
+
+        lru.get_mut(&key)
+            .expect("entry must exist after miss")
+            .rendered = "<hit-poison>".to_string();
+        let second = render_cached(&ctx, None, &cfg, &key, &mut lru);
         assert_eq!(
-            entry.time_bucket, tb,
-            "time bucket untouched by second call - proves the hit branch ran"
+            second, "<hit-poison>",
+            "hit branch must serve the stored value verbatim"
         );
     }
 }

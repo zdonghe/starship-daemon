@@ -82,4 +82,29 @@ mod tests {
         let k2 = compute_cache_key(Path::new("/a"), "vi", 120, 0, 5);
         assert_ne!(k1, k2);
     }
+
+    #[test]
+    fn compute_cache_key_each_field_differentiates() {
+        let base = || compute_cache_key(Path::new("/a"), "vi", 120, 7, 3);
+        assert_ne!(
+            base(),
+            compute_cache_key(Path::new("/b"), "vi", 120, 7, 3),
+            "cwd must be part of the key"
+        );
+        assert_ne!(
+            base(),
+            compute_cache_key(Path::new("/a"), "emacs", 120, 7, 3),
+            "keymap must be part of the key"
+        );
+        assert_ne!(
+            base(),
+            compute_cache_key(Path::new("/a"), "vi", 121, 7, 3),
+            "terminal_width must be part of the key"
+        );
+        assert_ne!(
+            base(),
+            compute_cache_key(Path::new("/a"), "vi", 120, 8, 3),
+            "config_mtime must be part of the key"
+        );
+    }
 }

@@ -43,9 +43,6 @@ fn explicit_vars(context: &starship::context::Context, base: &str) -> BTreeSet<S
     vars
 }
 
-// Parity port of src/render/fork.rs expand_all: ${m} vs $m are equivalent
-// because formatter/spec.pest reduces both to the same variable-name token,
-// so get_variables() extraction is identical either way.
 fn resolve_format(
     context: &starship::context::Context,
     base: &str,
@@ -68,10 +65,6 @@ fn resolve_format(
         .replace("$all", &replacement)
 }
 
-// Mirrors upstream handle_module/should_add_implicit_module: bare `custom`
-// expands to every enabled [custom.*] child not explicitly referenced in the
-// format; bare `env_var` renders the top-level module plus its enabled table
-// children (scalar children excluded) not explicitly referenced.
 fn implicit_children(
     context: &starship::context::Context,
     kind: &str,
@@ -157,6 +150,83 @@ fn truncate_utf8(s: &str, cap: usize) -> String {
     s[..end].to_string()
 }
 
+fn timed_hit_sample(state: &DaemonState, key: &cache::CacheKey, ctx: &RenderContext) -> bool {
+    state.lru.peek(key).is_some_and(|v| {
+        v.time_bucket == cache::current_minute() && v.status_code == ctx.status_code
+    })
+}
+
+fn timed_cold_render(
+    ctx: &RenderContext,
+    git_dir: Option<&Path>,
+    config: &toml::Table,
+) -> Duration {
+    render::clear_repo_cache();
+    let (_out, d) =
+        time_it(|| render::render_prompt_with_config(ctx, git_dir, config, BustDir::Fresh));
+    d
+}
+
+fn timed_warm_render(
+    ctx: &RenderContext,
+    git_dir: Option<&Path>,
+    config: &toml::Table,
+) -> Duration {
+    let (_out, d) =
+        time_it(|| render::render_prompt_with_config(ctx, git_dir, config, BustDir::Fresh));
+    d
+}
+
+fn render_path_rows(cold: Duration, warm: Duration, lru: Duration) -> String {
+    let mut rows = String::new();
+    for (label, d) in [
+        ("cold (fresh context, repo open)", cold),
+        ("warm (context+repo cache reused)", warm),
+        ("lru (daemon render-cache hit)", lru),
+    ] {
+        rows.push_str(&format!(" {:<42} {}\n", label, fmt_dur(d)));
+    }
+    rows
+}
+
+fn collect_module_timings(sctx: &starship::context::Context) -> Vec<ModuleTiming> {
+    let explicit = explicit_vars(sctx, &sctx.root_config.format);
+    let resolved = resolve_format(sctx, &sctx.root_config.format, &explicit);
+    let mut mods: Vec<ModuleTiming> = Vec::new();
+    for name in module_names(sctx, &resolved, &explicit) {
+        let start = Instant::now();
+        let value = starship::print::get_module(&name, sctx);
+        let duration = start.elapsed();
+        if let Some(v) = value
+            && (!v.is_empty() || duration.as_millis() > 0)
+        {
+            mods.push(ModuleTiming {
+                name,
+                value: v.replace('\n', "\\n"),
+                duration,
+            });
+        }
+    }
+    mods.sort_by_key(|a| Reverse(a.duration));
+    mods
+}
+
+fn module_table_rows(mods: Vec<ModuleTiming>) -> String {
+    let mut rows = String::new();
+    rows.push_str(
+        "\n Here are the timings of modules in your prompt (warm repo, >=1ms or output):\n",
+    );
+    for m in mods {
+        rows.push_str(&format!(
+            " {}  -  {}  -   \"{}\"\n",
+            m.name,
+            fmt_dur(m.duration),
+            m.value
+        ));
+    }
+    rows
+}
+
 pub(crate) fn build_report(state: &mut DaemonState, req: &ParsedRequest) -> String {
     debug_assert_eq!(req.kind, RequestKind::Timings);
 
@@ -192,29 +262,10 @@ pub(crate) fn build_report(state: &mut DaemonState, req: &ParsedRequest) -> Stri
         watcher_version,
     );
 
-    // Answers "would the next real prompt have been a HIT?" - so it must be
-    // sampled BEFORE any render below populates/promotes entries.
-    let hit = state.lru.peek(&key).is_some_and(|v| {
-        v.time_bucket == cache::current_minute() && v.status_code == ctx.status_code
-    });
+    let hit = timed_hit_sample(state, &key, &ctx);
 
-    render::clear_repo_cache();
-    let (_cold_out, cold) = time_it(|| {
-        render::render_prompt_with_config(
-            &ctx,
-            git_dir.as_deref(),
-            &state.cached_config,
-            BustDir::Fresh,
-        )
-    });
-    let (_warm_out, warm) = time_it(|| {
-        render::render_prompt_with_config(
-            &ctx,
-            git_dir.as_deref(),
-            &state.cached_config,
-            BustDir::Fresh,
-        )
-    });
+    let cold = timed_cold_render(&ctx, git_dir.as_deref(), &state.cached_config);
+    let warm = timed_warm_render(&ctx, git_dir.as_deref(), &state.cached_config);
 
     let _ = state.render_prompt(&ctx, git_dir.as_deref(), false, config_mtime);
     let (_lru_out, lru) =
@@ -225,45 +276,11 @@ pub(crate) fn build_report(state: &mut DaemonState, req: &ParsedRequest) -> Stri
         cwd.display(),
         if hit { "HIT" } else { "MISS" }
     );
-    for (label, d) in [
-        ("cold (fresh context, repo open)", cold),
-        ("warm (context+repo cache reused)", warm),
-        ("lru (daemon render-cache hit)", lru),
-    ] {
-        report.push_str(&format!(" {:<42} {}\n", label, fmt_dur(d)));
-    }
+    report.push_str(&render_path_rows(cold, warm, lru));
 
     let sctx = render::prepare_ctx(git_dir.as_deref(), &cwd, &ctx, &state.cached_config);
-    let explicit = explicit_vars(&sctx, &sctx.root_config.format);
-    let resolved = resolve_format(&sctx, &sctx.root_config.format, &explicit);
-    let mut mods: Vec<ModuleTiming> = Vec::new();
-    for name in module_names(&sctx, &resolved, &explicit) {
-        let start = Instant::now();
-        let value = starship::print::get_module(&name, &sctx);
-        let duration = start.elapsed();
-        if let Some(v) = value
-            && (!v.is_empty() || duration.as_millis() > 0)
-        {
-            mods.push(ModuleTiming {
-                name,
-                value: v.replace('\n', "\\n"),
-                duration,
-            });
-        }
-    }
-    mods.sort_by_key(|a| Reverse(a.duration));
-
-    report.push_str(
-        "\n Here are the timings of modules in your prompt (warm repo, >=1ms or output):\n",
-    );
-    for m in mods {
-        report.push_str(&format!(
-            " {}  -  {}  -   \"{}\"\n",
-            m.name,
-            fmt_dur(m.duration),
-            m.value
-        ));
-    }
+    let mods = collect_module_timings(&sctx);
+    report.push_str(&module_table_rows(mods));
 
     if let Some(ref gd) = git_dir {
         render::save_repo_cache(gd, sctx);

@@ -1,30 +1,5 @@
-<#
-.SYNOPSIS
-    Benchmark the starship daemon over IPC via global:prompt.
-.DESCRIPTION
-    For each variant it spawns the daemon on an isolated named pipe, waits for the pipe
-    to accept connections, imports the module fresh, warms up 15 rounds, then tries 200
-    calls through the module's global:prompt.
-
-    Env vars:
-      STARSHIP_BENCH_DIR    - directory to test (default: this script's directory)
-      STARSHIP_DAEMON_PATH  - path to stock starship-daemon.exe (default build, required for IPC)
-      STARSHIP_DAEMON_PATH_FORK - path to fork-native daemon (optional, adds fork variants)
-      STARSHIP_CONFIG       - path to starship.toml
-
-    Run this from a dedicated pwsh session: it loads/removes the module, which replaces the
-    session's global:prompt, and it restores env vars + cwd afterwards but not the module.
-    Requires PowerShell 7.4+.
-
-    Parameters:
-      -SkipSubprocess  skip the `starship prompt` subprocess baseline row
-#>
 
 param([switch]$SkipSubprocess)
-
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -51,10 +26,6 @@ $modulePath = "$PSScriptRoot\..\starship-daemon.psm1"
 $Warmup = 15; $Samples = 200
 $script:spawned = @()
 $allResults = @()
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 function Wait-DaemonReady {
     param([string]$PipeName, [int]$TimeoutMs = 15000)
@@ -129,10 +100,6 @@ function Measure-Prompt {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Prepare for testing
-# ---------------------------------------------------------------------------
-
 $configToUse = $cfg
 if ($daemon -or $daemonFork) {
     if (-not $configToUse) {
@@ -163,17 +130,13 @@ if ($daemonFork) {
 
 $variants = @()
 if ($resolvedDaemon) {
-    $variants += @{ label = "stock (no-cache)"; cache = 0; exe = $resolvedDaemon }
-    $variants += @{ label = "stock + cache";    cache = 1; exe = $resolvedDaemon }
+    $variants += @{ label = "default build, no-cache"; cache = 0; exe = $resolvedDaemon }
+    $variants += @{ label = "default build + cache";   cache = 1; exe = $resolvedDaemon }
 }
 if ($resolvedDaemonFork) {
     $variants += @{ label = "fork (no-cache)"; cache = 0; exe = $resolvedDaemonFork }
     $variants += @{ label = "fork + cache";    cache = 1; exe = $resolvedDaemonFork }
 }
-
-# ---------------------------------------------------------------------------
-# Benchmarks
-# ---------------------------------------------------------------------------
 
 function Invoke-SubprocessBaseline {
     $exe = (Get-Command starship -CommandType Application -ErrorAction SilentlyContinue).Source
@@ -245,10 +208,6 @@ function Invoke-IPCBenchmarks {
     }
     $rows
 }
-
-# ---------------------------------------------------------------------------
-# Run + Cleanup
-# ---------------------------------------------------------------------------
 
 try {
     if (-not $SkipSubprocess) {

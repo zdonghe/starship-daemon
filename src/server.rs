@@ -429,8 +429,11 @@ fn service_signaled_sessions(sessions: &mut [Session], state: &mut DaemonState) 
             .map(|(i, _)| i)
     {
         #[cfg(debug_assertions)]
-        dbg(format_args!("cache full ({}), evicting LRU", MAX_SESSIONS));
-        disconnect_session(&mut sessions[i], DisconnectReason::LruEvict);
+        dbg(format_args!(
+            "session capacity reached ({}), disconnecting least-recently-active session",
+            MAX_SESSIONS
+        ));
+        disconnect_session(&mut sessions[i], DisconnectReason::SessionCapacity);
     }
 }
 
@@ -488,13 +491,12 @@ impl Server {
     }
 }
 
-// ---- debug-only (all cfg(debug_assertions)) ----
 #[cfg(debug_assertions)]
 static CONNECTED: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum DisconnectReason {
-    LruEvict,
+    SessionCapacity,
     ClientClosed,
     Malformed,
     HandleError,
@@ -504,5 +506,7 @@ enum DisconnectReason {
 
 #[cfg(debug_assertions)]
 fn dbg(args: std::fmt::Arguments) {
-    eprintln!("[dbg] {}", args);
+    if starship_daemon::debug_enabled() {
+        eprintln!("[dbg] {}", args);
+    }
 }

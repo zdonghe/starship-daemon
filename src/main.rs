@@ -32,7 +32,9 @@ fn main() {
     };
 
     #[cfg(debug_assertions)]
-    start_stats_reporter();
+    if starship_daemon::debug_enabled() {
+        start_stats_reporter();
+    }
 
     if std::env::var("STARSHIP_DAEMON_THROTTLE").as_deref() != Ok("1") {
         starship_daemon::ffi::disable_power_throttling();
@@ -42,7 +44,6 @@ fn main() {
     server.run();
 }
 
-// ---- debug-only (all cfg(debug_assertions)) ----
 #[cfg(debug_assertions)]
 fn start_stats_reporter() {
     STATS_ENABLED.store(true, Ordering::Relaxed);

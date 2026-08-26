@@ -1,3 +1,5 @@
+mod common;
+
 use std::time::Duration;
 
 use starship_daemon::cache;
@@ -9,20 +11,7 @@ const SETTLE: Duration = Duration::from_millis(15);
 fn zero_watcher_version_stays_fresh_across_cds() {
     let r = tempfile::TempDir::new().unwrap();
     let repo = r.path();
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .expect("git failed");
-        assert!(
-            out.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
+    let git = |args: &[&str]| common::git(repo, args);
     git(&["init"]);
     git(&["config", "user.email", "test@test"]);
     git(&["config", "user.name", "test"]);

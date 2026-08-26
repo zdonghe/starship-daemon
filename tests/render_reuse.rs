@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Mutex;
 
 use starship_daemon::cache;
@@ -10,20 +12,7 @@ fn render_cached_reuses_status_at_stable_watcher_version() {
     let _guard = CACHE_LOCK.lock().unwrap();
     let r = tempfile::TempDir::new().unwrap();
     let repo = r.path();
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .expect("git command failed");
-        assert!(
-            out.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
+    let git = |args: &[&str]| common::git(repo, args);
     git(&["init"]);
     git(&["config", "user.email", "test@test"]);
     git(&["config", "user.name", "test"]);
@@ -79,24 +68,12 @@ fn config_change_at_stable_version_forces_fresh_status() {
     let _guard = CACHE_LOCK.lock().unwrap();
     let r = tempfile::TempDir::new().unwrap();
     let repo = r.path();
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .expect("git command failed");
-        assert!(
-            out.status.success(),
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
+    let git = |args: &[&str]| common::git(repo, args);
     git(&["init"]);
     git(&["config", "user.email", "test@test"]);
     git(&["config", "user.name", "test"]);
     std::fs::write(repo.join("a.txt"), "hello").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(15));
     git(&["add", "a.txt"]);
     git(&["commit", "-m", "initial"]);
     std::thread::sleep(std::time::Duration::from_millis(15));

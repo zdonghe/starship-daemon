@@ -39,9 +39,34 @@ impl MultiRepoHarness {
     }
 
     fn settle_and_poll(&mut self) {
-        for _ in 0..2 {
-            thread::sleep(Duration::from_millis(300));
+        let start = std::time::Instant::now();
+        let mut stable_rounds = 0u32;
+        let mut last = (
+            self.watcher.version(self.a.path()),
+            self.watcher.version(self.b.path()),
+        );
+        let deadline = start + Duration::from_secs(5);
+        loop {
+            thread::sleep(Duration::from_millis(25));
             self.watcher.poll();
+            let cur = (
+                self.watcher.version(self.a.path()),
+                self.watcher.version(self.b.path()),
+            );
+            let min_elapsed = start.elapsed() >= Duration::from_millis(500);
+            if cur == last && min_elapsed {
+                stable_rounds += 1;
+                if stable_rounds >= 3 {
+                    return;
+                }
+            } else {
+                stable_rounds = 0;
+                last = cur;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "watcher versions never stabilized"
+            );
         }
     }
 
@@ -81,10 +106,6 @@ impl MultiRepoHarness {
     }
 }
 
-// ============================================================
-// Version bump isolation
-// ============================================================
-
 #[test]
 fn version_isolation() {
     let mut h = MultiRepoHarness::new();
@@ -118,10 +139,6 @@ fn version_isolation() {
         "A version unchanged"
     );
 }
-
-// ============================================================
-// Render isolation — change only affects the modified repo
-// ============================================================
 
 #[test]
 fn two_repos_untracked_file() {

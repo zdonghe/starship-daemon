@@ -1,19 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 mod common;
-use common::settle;
+use common::{git, settle};
 
 fn init_temp_repo() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
-    let out = Command::new("git")
-        .args(["init"])
-        .current_dir(&repo)
-        .output()
-        .expect("git init failed");
-    assert!(out.status.success());
+    git(&repo, &["init"]);
     settle();
     (dir, repo)
 }

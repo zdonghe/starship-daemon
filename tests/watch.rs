@@ -136,10 +136,6 @@ fn cancel_io_is_needed_readdirectorychangesw_pending_at_drop() {
     let mut w = WatcherState::new();
     w.ensure(&p);
 
-    // After ensure, ReadDirectoryChangesW is submitted asynchronously.
-    // change_event is a manual-reset event, initially unsignaled.
-    // Since no change has occurred yet, the IO completion hasn't fired.
-    // Overlapped IO is pending — CancelIoEx is required before CloseHandle.
     let rc = unsafe { ffi::WaitForSingleObject(w.change_event(0), 0) };
 
     assert_eq!(
@@ -148,6 +144,4 @@ fn cancel_io_is_needed_readdirectorychangesw_pending_at_drop() {
         "ReadDirectoryChangesW unexpectedly completed immediately (rc={rc}). \
          IO should be pending. Without CancelIoEx, CloseHandle in drop races with it."
     );
-
-    // w is dropped here. CancelIoEx + GetOverlappedResult ensures safety.
 }

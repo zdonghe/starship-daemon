@@ -6,8 +6,6 @@ use starship_daemon::render;
 mod common;
 use common::*;
 
-// ==== End-to-end render + cache integration test ====
-
 #[test]
 fn render_output_reflects_git_status_changes() {
     let r = TestRepo::new();
@@ -143,8 +141,6 @@ fn different_cwd_produces_different_render() {
         "render output should differ for different git repos"
     );
 }
-
-// ===== Render output validation tests =====
 
 fn render_ctx(repo: &Path) -> render::RenderContext {
     render::RenderContext {
@@ -330,9 +326,6 @@ fn render_bare_repo_does_not_crash() {
         render::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg, render::BustDir::Fresh);
     assert!(!out.is_empty(), "bare repo render should produce output");
 }
-
-// render_typechange_symlink_to_file omitted: gix does not detect typechanges
-// on Windows even when `core.symlinks=true` and git CLI reports them.
 
 #[test]
 fn render_subdir_file_create() {

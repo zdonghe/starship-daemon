@@ -13,8 +13,6 @@ fn ensure_watcher(w: &mut WatcherState, repo: &std::path::Path) {
     w.poll();
 }
 
-// ==== Version bump tests ====
-
 #[test]
 fn bumps_on_file_create() {
     let r = TestRepo::new();
@@ -223,8 +221,12 @@ fn bumps_on_merge() {
     assert_version_bumped(&mut w, r.path());
 }
 
-#[test]
-fn bumps_on_fetch() {
+fn two_clone_remote() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
     let bare = tempfile::TempDir::new().unwrap();
     let bare_path = bare.path().join("remote.git");
     std::fs::create_dir_all(&bare_path).unwrap();
@@ -266,6 +268,12 @@ fn bumps_on_fetch() {
     git(&wt_b, &["commit", "-m", "second commit"]);
     git(&wt_b, &["push", "origin", "main"]);
 
+    (bare, a_dir, b_dir, wt_a)
+}
+
+#[test]
+fn bumps_on_fetch() {
+    let (_bare, _a_dir, _b_dir, wt_a) = two_clone_remote();
     settle();
 
     let mut w = WatcherState::new();
@@ -277,47 +285,7 @@ fn bumps_on_fetch() {
 
 #[test]
 fn bumps_on_pull() {
-    let bare = tempfile::TempDir::new().unwrap();
-    let bare_path = bare.path().join("remote.git");
-    std::fs::create_dir_all(&bare_path).unwrap();
-    git(&bare_path, &["init", "--bare"]);
-
-    let a_dir = tempfile::TempDir::new().unwrap();
-    let wt_a = a_dir.path().join("a");
-    std::fs::create_dir_all(&wt_a).unwrap();
-    git(&wt_a, &["init"]);
-    git(&wt_a, &["branch", "-M", "main"]);
-    git(&wt_a, &["config", "user.email", "test@test"]);
-    git(&wt_a, &["config", "user.name", "test"]);
-    git(
-        &wt_a,
-        &["remote", "add", "origin", bare_path.to_str().unwrap()],
-    );
-    std::fs::write(wt_a.join("init.txt"), "init").unwrap();
-    git(&wt_a, &["add", "init.txt"]);
-    git(&wt_a, &["commit", "-m", "init"]);
-    git(&wt_a, &["push", "-u", "origin", "main"]);
-
-    let b_dir = tempfile::TempDir::new().unwrap();
-    let wt_b = b_dir.path().join("b");
-    std::fs::create_dir_all(&wt_b).unwrap();
-    git(&wt_b, &["init"]);
-    git(&wt_b, &["branch", "-M", "main"]);
-    git(&wt_b, &["config", "user.email", "test@test"]);
-    git(&wt_b, &["config", "user.name", "test"]);
-    git(
-        &wt_b,
-        &["remote", "add", "origin", bare_path.to_str().unwrap()],
-    );
-    git(
-        &wt_b,
-        &["pull", "origin", "main", "--allow-unrelated-histories"],
-    );
-    std::fs::write(wt_b.join("new.txt"), "new data").unwrap();
-    git(&wt_b, &["add", "new.txt"]);
-    git(&wt_b, &["commit", "-m", "second commit"]);
-    git(&wt_b, &["push", "origin", "main"]);
-
+    let (_bare, _a_dir, _b_dir, wt_a) = two_clone_remote();
     settle();
 
     let mut w = WatcherState::new();
@@ -416,8 +384,6 @@ fn bumps_on_branch_create() {
     assert_version_bumped(&mut w, r.path());
 }
 
-// ==== Config mtime test ====
-
 #[test]
 fn config_mtime_changes_cache_key() {
     let cfg_dir = tempfile::TempDir::new().unwrap();
@@ -429,8 +395,6 @@ fn config_mtime_changes_cache_key() {
     let mtime_before = cache::get_mtime_ns(&cfg_path);
     let key_before = cache::compute_cache_key(r.path(), "vi", 120, mtime_before, 0);
 
-    // Retry with escalating backoff: coarse-mtime filesystems (FAT, network)
-    // may not observe a rewrite within the same tick.
     let mut mtime_after = mtime_before;
     for delay_ms in [50u64, 100, 200, 400, 800] {
         std::thread::sleep(Duration::from_millis(delay_ms));

@@ -43,6 +43,51 @@ pub fn settle() {
     thread::sleep(Duration::from_millis(SLEEP_MS));
 }
 
+pub fn settle_watcher() {
+    thread::sleep(Duration::from_millis(200));
+}
+
+pub fn ensure_watcher(w: &mut WatcherState, repo: &Path) {
+    w.ensure(repo);
+    thread::sleep(Duration::from_millis(300));
+    w.poll();
+}
+
+pub struct RemoteScaffold {
+    pub bare: tempfile::TempDir,
+    pub work: tempfile::TempDir,
+    pub path: std::path::PathBuf,
+}
+
+pub fn remote_with_worktree(name: &str) -> RemoteScaffold {
+    let bare = tempfile::TempDir::new().unwrap();
+    let bare_path = bare.path().join("remote.git");
+    std::fs::create_dir_all(&bare_path).unwrap();
+    git(&bare_path, &["init", "--bare"]);
+
+    let work = tempfile::TempDir::new().unwrap();
+    let wt = work.path().join(name);
+    std::fs::create_dir_all(&wt).unwrap();
+    git(&wt, &["init"]);
+    git(&wt, &["branch", "-M", "main"]);
+    git(&wt, &["config", "user.email", "test@test"]);
+    git(&wt, &["config", "user.name", "test"]);
+    git(
+        &wt,
+        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+    );
+    std::fs::write(wt.join("init.txt"), "init").unwrap();
+    git(&wt, &["add", "init.txt"]);
+    git(&wt, &["commit", "-m", "init"]);
+    git(&wt, &["push", "-u", "origin", "main"]);
+
+    RemoteScaffold {
+        bare,
+        work,
+        path: wt,
+    }
+}
+
 pub struct TestRepo {
     dir: tempfile::TempDir,
 }

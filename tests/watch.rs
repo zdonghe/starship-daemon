@@ -2,24 +2,12 @@ use starship_daemon::ffi;
 use starship_daemon::watch::WatcherState;
 
 mod common;
-use common::{TestRepo, assert_version_bumped};
-
-fn write_file(repo: &TestRepo, name: &str, content: &str) {
-    repo.write(name, content);
-}
-
-fn repopath(repo: &TestRepo) -> std::path::PathBuf {
-    repo.path().to_path_buf()
-}
-
-fn settle_watcher() {
-    std::thread::sleep(std::time::Duration::from_millis(200));
-}
+use common::{TestRepo, assert_version_bumped, settle_watcher};
 
 #[test]
 fn ensure_creates_watcher_entry() {
     let repo = TestRepo::new();
-    let p = repopath(&repo);
+    let p = repo.path().to_path_buf();
 
     let mut w = WatcherState::new();
     w.ensure(&p);
@@ -35,7 +23,7 @@ fn unknown_repo_returns_zero_version() {
 #[test]
 fn ensure_is_idempotent() {
     let repo = TestRepo::new();
-    let p = repopath(&repo);
+    let p = repo.path().to_path_buf();
 
     let mut w = WatcherState::new();
     w.ensure(&p);
@@ -46,14 +34,14 @@ fn ensure_is_idempotent() {
 #[test]
 fn poll_increases_version_on_file_change() {
     let repo = TestRepo::new();
-    let p = repopath(&repo);
+    let p = repo.path().to_path_buf();
 
     let mut w = WatcherState::new();
     w.ensure(&p);
 
     let v0 = w.version(&p);
 
-    write_file(&repo, "trigger", "hello");
+    repo.write("trigger", "hello");
     settle_watcher();
     w.poll();
     assert!(
@@ -63,7 +51,7 @@ fn poll_increases_version_on_file_change() {
 
     let v1 = w.version(&p);
 
-    write_file(&repo, "trigger2", "world");
+    repo.write("trigger2", "world");
     settle_watcher();
     w.poll();
     assert!(
@@ -75,7 +63,7 @@ fn poll_increases_version_on_file_change() {
 #[test]
 fn anchored_doublestar_rule_does_not_ignore_sibling_paths() {
     let repo = TestRepo::new();
-    let p = repopath(&repo);
+    let p = repo.path().to_path_buf();
 
     repo.write(".gitignore", "a/**/b\n");
     std::fs::create_dir_all(p.join("x").join("a")).unwrap();
@@ -90,7 +78,7 @@ fn anchored_doublestar_rule_does_not_ignore_sibling_paths() {
 #[test]
 fn anchored_doublestar_rule_suppresses_matching_paths() {
     let repo = TestRepo::new();
-    let p = repopath(&repo);
+    let p = repo.path().to_path_buf();
 
     repo.write(".gitignore", "a/**/b\n");
     std::fs::create_dir_all(p.join("a").join("x")).unwrap();
@@ -117,7 +105,7 @@ fn anchored_doublestar_rule_suppresses_matching_paths() {
 #[test]
 fn trailing_doublestar_does_not_ignore_bare_component() {
     let repo = TestRepo::new();
-    let p = repopath(&repo);
+    let p = repo.path().to_path_buf();
 
     repo.write(".gitignore", "a/**\n");
 
@@ -131,7 +119,7 @@ fn trailing_doublestar_does_not_ignore_bare_component() {
 #[test]
 fn cancel_io_is_needed_readdirectorychangesw_pending_at_drop() {
     let repo = TestRepo::new();
-    let p = repopath(&repo);
+    let p = repo.path().to_path_buf();
 
     let mut w = WatcherState::new();
     w.ensure(&p);

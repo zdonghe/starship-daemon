@@ -445,35 +445,15 @@ fn ipc_git_push_stale_ahead() {
 }
 
 fn setup_ahead_repo() -> (tempfile::TempDir, tempfile::TempDir, String) {
-    let bare_dir = tempfile::TempDir::new().unwrap();
-    let bare_path = bare_dir.path().join("remote.git");
-    std::fs::create_dir_all(&bare_path).unwrap();
-    common::git(&bare_path, &["init", "--bare"]);
-
-    let work_dir = tempfile::TempDir::new().unwrap();
-    let repo_path = work_dir.path().join("repo");
-    std::fs::create_dir_all(&repo_path).unwrap();
-    common::git(&repo_path, &["init"]);
-    common::git(&repo_path, &["branch", "-M", "main"]);
-    common::git(&repo_path, &["config", "user.email", "test@test"]);
-    common::git(&repo_path, &["config", "user.name", "test"]);
-    common::git(
-        &repo_path,
-        &["remote", "add", "origin", bare_path.to_str().unwrap()],
-    );
-
-    std::fs::write(repo_path.join("init.txt"), "init").unwrap();
-    common::git(&repo_path, &["add", "init.txt"]);
-    common::git(&repo_path, &["commit", "-m", "init"]);
-    common::git(&repo_path, &["push", "-u", "origin", "main"]);
+    let remote = common::remote_with_worktree("repo");
     common::settle();
 
-    std::fs::write(repo_path.join("ahead.txt"), "ahead").unwrap();
-    common::git(&repo_path, &["add", "ahead.txt"]);
-    common::git(&repo_path, &["commit", "-m", "ahead"]);
+    std::fs::write(remote.path.join("ahead.txt"), "ahead").unwrap();
+    common::git(&remote.path, &["add", "ahead.txt"]);
+    common::git(&remote.path, &["commit", "-m", "ahead"]);
 
-    let repo_str = repo_path.to_str().unwrap().to_string();
-    (bare_dir, work_dir, repo_str)
+    let repo_str = remote.path.to_str().unwrap().to_string();
+    (remote.bare, remote.work, repo_str)
 }
 
 #[test]
@@ -488,7 +468,7 @@ fn ipc_stalled_client_does_not_freeze_daemon() {
         let r = b.read_response_timeout(500);
         assert!(
             r.is_some(),
-            "daemon froze on client A stalled mid-request - C1 refuted, got {r:?}"
+            "daemon froze on client A stalled mid-request, got {r:?}"
         );
         check_response(&r.unwrap());
 
@@ -510,7 +490,7 @@ fn ipc_zero_cwd_len_served() {
         let r = c.read_response_timeout(1000);
         assert!(
             r.is_some(),
-            "daemon disconnected a cwd_len=0 request - C2 refuted, got {r:?}"
+            "daemon disconnected a cwd_len=0 request, got {r:?}"
         );
         check_response(&r.unwrap());
     });
@@ -528,7 +508,7 @@ fn ipc_fragmented_header_accumulates() {
         let r = c.read_response_timeout(2000);
         assert!(
             r.is_some(),
-            "fragmented header disconnected the client - C6 refuted, got {r:?}"
+            "fragmented header disconnected the client, got {r:?}"
         );
         check_response(&r.unwrap());
     });
@@ -548,7 +528,7 @@ fn ipc_fragmented_cwd_accumulates() {
         let r = c.read_response_timeout(2000);
         assert!(
             r.is_some(),
-            "fragmented cwd body disconnected the client - C6 refuted, got {r:?}"
+            "fragmented cwd body disconnected the client, got {r:?}"
         );
         check_response(&r.unwrap());
     });
@@ -591,7 +571,7 @@ fn ipc_git_change_fresh_at_serve() {
             );
             assert!(
                 cleared_at.is_some(),
-                "served prompt never reflected the push within 5s - C7 refuted"
+                "served prompt never reflected the push within 5s"
             );
         },
     );
@@ -666,11 +646,7 @@ fn ipc_unread_responses_do_not_freeze_daemon() {
             }
             b.read_response_timeout(5000).is_some()
         });
-        assert_eq!(
-            served,
-            Some(true),
-            "daemon froze on A's unread responses (synchronous write_all)"
-        );
+        assert_eq!(served, Some(true), "daemon froze on A's unread responses");
     });
 }
 

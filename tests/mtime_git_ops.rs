@@ -7,17 +7,13 @@ use starship_daemon::watch::WatcherState;
 mod common;
 use common::*;
 
-fn ensure_watcher(w: &mut WatcherState, repo: &std::path::Path) {
-    w.ensure(repo);
-    thread::sleep(Duration::from_millis(300));
-    w.poll();
-}
-
 #[test]
 fn bumps_on_file_create() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.write("new_file.txt", "data");
     assert_version_bumped(&mut w, r.path());
 }
@@ -28,6 +24,8 @@ fn bumps_on_file_delete() {
     let mut w = WatcherState::new();
     r.write("temp.txt", "data");
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.remove("temp.txt");
     assert_version_bumped(&mut w, r.path());
 }
@@ -38,6 +36,8 @@ fn bumps_on_git_add() {
     let mut w = WatcherState::new();
     r.write("unstaged.txt", "data");
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["add", "unstaged.txt"]);
     assert_version_bumped(&mut w, r.path());
 }
@@ -60,6 +60,8 @@ fn bumps_on_checkout() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["checkout", "other"]);
     assert_version_bumped(&mut w, r.path());
 }
@@ -69,6 +71,8 @@ fn bumps_on_checkout_new_branch() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["checkout", "-b", "feature"]);
     assert_version_bumped(&mut w, r.path());
 }
@@ -110,6 +114,8 @@ fn bumps_on_stash_push() {
     r.git(&["commit", "-m", "add stash.txt"]);
     r.write("stash.txt", "modified");
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["stash", "push"]);
     assert_version_bumped(&mut w, r.path());
 }
@@ -150,6 +156,7 @@ fn bumps_on_commit_amend() {
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
     thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["commit", "--amend", "-m", "amended initial"]);
     assert_version_bumped(&mut w, r.path());
 }
@@ -227,26 +234,7 @@ fn two_clone_remote() -> (
     tempfile::TempDir,
     std::path::PathBuf,
 ) {
-    let bare = tempfile::TempDir::new().unwrap();
-    let bare_path = bare.path().join("remote.git");
-    std::fs::create_dir_all(&bare_path).unwrap();
-    git(&bare_path, &["init", "--bare"]);
-
-    let a_dir = tempfile::TempDir::new().unwrap();
-    let wt_a = a_dir.path().join("a");
-    std::fs::create_dir_all(&wt_a).unwrap();
-    git(&wt_a, &["init"]);
-    git(&wt_a, &["branch", "-M", "main"]);
-    git(&wt_a, &["config", "user.email", "test@test"]);
-    git(&wt_a, &["config", "user.name", "test"]);
-    git(
-        &wt_a,
-        &["remote", "add", "origin", bare_path.to_str().unwrap()],
-    );
-    std::fs::write(wt_a.join("init.txt"), "init").unwrap();
-    git(&wt_a, &["add", "init.txt"]);
-    git(&wt_a, &["commit", "-m", "init"]);
-    git(&wt_a, &["push", "-u", "origin", "main"]);
+    let a = remote_with_worktree("a");
 
     let b_dir = tempfile::TempDir::new().unwrap();
     let wt_b = b_dir.path().join("b");
@@ -257,7 +245,12 @@ fn two_clone_remote() -> (
     git(&wt_b, &["config", "user.name", "test"]);
     git(
         &wt_b,
-        &["remote", "add", "origin", bare_path.to_str().unwrap()],
+        &[
+            "remote",
+            "add",
+            "origin",
+            a.bare.path().join("remote.git").to_str().unwrap(),
+        ],
     );
     git(
         &wt_b,
@@ -268,7 +261,7 @@ fn two_clone_remote() -> (
     git(&wt_b, &["commit", "-m", "second commit"]);
     git(&wt_b, &["push", "origin", "main"]);
 
-    (bare, a_dir, b_dir, wt_a)
+    (a.bare, a.work, b_dir, a.path)
 }
 
 #[test]
@@ -279,6 +272,8 @@ fn bumps_on_fetch() {
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, &wt_a);
 
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     git(&wt_a, &["fetch"]);
     assert_version_bumped(&mut w, &wt_a);
 }
@@ -291,6 +286,8 @@ fn bumps_on_pull() {
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, &wt_a);
 
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     git(&wt_a, &["pull", "--no-edit"]);
     assert_version_bumped(&mut w, &wt_a);
 }
@@ -333,6 +330,8 @@ fn bumps_on_clean() {
     let mut w = WatcherState::new();
     r.write("untracked_clean.txt", "to be cleaned");
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["clean", "-f"]);
     assert_version_bumped(&mut w, r.path());
 }
@@ -342,6 +341,8 @@ fn bumps_on_gc() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["gc"]);
     assert_version_bumped(&mut w, r.path());
 }
@@ -352,6 +353,8 @@ fn bumps_on_manual_rename() {
     let mut w = WatcherState::new();
     r.write("rename_me.txt", "content");
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     std::fs::rename(r.path().join("rename_me.txt"), r.path().join("renamed.txt")).unwrap();
     assert_version_bumped(&mut w, r.path());
 }
@@ -380,6 +383,8 @@ fn bumps_on_branch_create() {
     let r = TestRepo::new();
     let mut w = WatcherState::new();
     ensure_watcher(&mut w, r.path());
+    thread::sleep(Duration::from_millis(50));
+    w.poll();
     r.git(&["branch", "unrelated"]);
     assert_version_bumped(&mut w, r.path());
 }

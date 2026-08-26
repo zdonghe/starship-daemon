@@ -6,6 +6,19 @@ use starship_daemon::render;
 mod common;
 use common::*;
 
+fn render_ctx(repo: &Path) -> render::RenderContext {
+    render::RenderContext {
+        cwd: repo.to_path_buf(),
+        terminal_width: 120,
+        status_code: 0,
+        keymap: "vi".to_string(),
+    }
+}
+
+fn render(repo: &Path, git_dir: Option<&Path>, cfg: &toml::Table) -> String {
+    render::render_prompt_with_config(&render_ctx(repo), git_dir, cfg, render::BustDir::Fresh)
+}
+
 #[test]
 fn render_output_reflects_git_status_changes() {
     let r = TestRepo::new();
@@ -57,12 +70,7 @@ fn render_output_reflects_git_status_changes() {
 fn render_output_is_deterministic() {
     let r = TestRepo::new();
     let cfg = toml::Table::new();
-    let ctx = render::RenderContext {
-        cwd: r.path().to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
+    let ctx = render_ctx(r.path());
 
     let git_dir = starship_daemon::find_git_dir(r.path());
     let out1 =
@@ -76,12 +84,7 @@ fn render_output_is_deterministic() {
 fn render_auto_finds_git_dir_when_none_passed() {
     let r = TestRepo::new();
     let cfg = toml::Table::new();
-    let ctx = render::RenderContext {
-        cwd: r.path().to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
+    let ctx = render_ctx(r.path());
 
     let git_dir = starship_daemon::find_git_dir(r.path());
     let explicit =
@@ -109,18 +112,8 @@ fn different_cwd_produces_different_render() {
     git(&nested, &["commit", "-m", "nested init"]);
     settle();
 
-    let ctx_main = render::RenderContext {
-        cwd: r.path().to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
-    let ctx_sub = render::RenderContext {
-        cwd: nested.clone(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
+    let ctx_main = render_ctx(r.path());
+    let ctx_sub = render_ctx(&nested);
 
     let git_dir_main = starship_daemon::find_git_dir(r.path());
     let git_dir_sub = starship_daemon::find_git_dir(&nested);
@@ -140,19 +133,6 @@ fn different_cwd_produces_different_render() {
         out_main, out_sub,
         "render output should differ for different git repos"
     );
-}
-
-fn render_ctx(repo: &Path) -> render::RenderContext {
-    render::RenderContext {
-        cwd: repo.to_path_buf(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    }
-}
-
-fn render(repo: &Path, git_dir: Option<&Path>, cfg: &toml::Table) -> String {
-    render::render_prompt_with_config(&render_ctx(repo), git_dir, cfg, render::BustDir::Fresh)
 }
 
 #[test]
@@ -315,12 +295,7 @@ fn render_bare_repo_does_not_crash() {
     git(&bare_path, &["init", "--bare"]);
     settle();
     let cfg = toml::Table::new();
-    let ctx = render::RenderContext {
-        cwd: bare_path.clone(),
-        terminal_width: 120,
-        status_code: 0,
-        keymap: "vi".to_string(),
-    };
+    let ctx = render_ctx(&bare_path);
     let git_dir = starship_daemon::find_git_dir(&bare_path);
     let out =
         render::render_prompt_with_config(&ctx, git_dir.as_deref(), &cfg, render::BustDir::Fresh);

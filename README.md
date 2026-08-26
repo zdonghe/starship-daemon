@@ -21,7 +21,7 @@ Import-Module "C:\path\to\starship-daemon.psm1" -DisableNameChecking
 
 The module auto-starts the daemon and replaces the `prompt` function.
 
-> Use the `-fork.exe` binary for segment-level caching ("fastest", uses the fork - see [Build](#build)). The stock binary is the default for upstream compatibility.
+> Use the `-fork.exe` binary for segment-level caching ("fastest", uses the fork - see [Build](#build)). It is also what a plain `cargo build` produces; the stock variant is opt-in for upstream compatibility.
 
 ## Config
 
@@ -53,13 +53,17 @@ Stop-StarshipDaemon
 
 ## Build
 
+The default feature is `fork`, so a plain build produces the fork-native binary:
+
 ```powershell
-# Stock build
+# Fork build (default)
 cargo build --release
 
-# Fork variant
-cargo build --release --no-default-features --features fork
+# Stock variant (upstream starship, whole-prompt caching)
+cargo build --release --no-default-features --features stock
 ```
+
+`starship-daemon --version` prints the compiled variant (`stock` or `fork`).
 
 
 ## Performance
@@ -84,6 +88,27 @@ The watcher tracks the entire directory for changes, which tells us when to inva
 Disable caching: `$env:STARSHIP_DAEMON_CACHE = 0`
 
 In a stock build, starship exposes no segment API, so the whole rendered prompt is cached instead. If the daemon is built with the fork, segment-level caching is used: every module is cached **except** `time`, `character`, `status`, and the `all` placeholder (those re-render live on every prompt). If any other module becomes invalid/outdated, that specific module can be recomputed without recomputing the entire prompt.
+
+## Diagnostics
+
+`Get-StarshipDaemonTimings` sends a one-off profiling request to the running daemon and returns render-path timings plus a per-module breakdown for the current directory as a string:
+
+```powershell
+Get-StarshipDaemonTimings [-Cwd <dir>] [-ExitCode 0] [-Keymap emacs]
+```
+
+The report briefly blocks the daemon, so other terminals' prompts queue behind it. The `Render path timing` section leads with a `cache: HIT` or `cache: MISS` line: it samples the daemon's LRU (without rendering) to predict whether your next real prompt in that directory would be served from cache or re-rendered - the timings request itself never takes the hit path.
+
+## Environment variables
+
+| Variable | Used by | Meaning |
+|----------|---------|---------|
+| `STARSHIP_DAEMON_PATH` | psm1 | Path to the daemon binary to auto-start |
+| `STARSHIP_DAEMON_PIPE` | daemon + client | Override the named pipe path (default `\\.\pipe\starship-daemon`) |
+| `STARSHIP_DAEMON_CACHE` | psm1 | Set to `0` to bypass the daemon's render cache |
+| `STARSHIP_CONFIG` | both | starship config file; changes are hot-reloaded |
+| `STARSHIP_DAEMON_THROTTLE` | daemon | Set to `1` to keep Windows power throttling active (by default the daemon disables it) |
+| `STARSHIP_DAEMON_DEBUG` | daemon | Debug builds only: set to `1` to enable `[dbg]` diagnostics and watcher stats |
 
 ## Benchmarking
 

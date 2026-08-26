@@ -10,16 +10,8 @@ static CACHE_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn render_cached_reuses_status_at_stable_watcher_version() {
     let _guard = CACHE_LOCK.lock().unwrap();
-    let r = tempfile::TempDir::new().unwrap();
+    let r = common::TestRepo::new();
     let repo = r.path();
-    let git = |args: &[&str]| common::git(repo, args);
-    git(&["init"]);
-    git(&["config", "user.email", "test@test"]);
-    git(&["config", "user.name", "test"]);
-    std::fs::write(repo.join("a.txt"), "hello").unwrap();
-    git(&["add", "a.txt"]);
-    git(&["commit", "-m", "initial"]);
-    std::thread::sleep(std::time::Duration::from_millis(15));
 
     let cfg = toml::toml! {
         format = "$git_status"
@@ -66,17 +58,8 @@ fn render_cached_reuses_status_at_stable_watcher_version() {
 #[test]
 fn config_change_at_stable_version_forces_fresh_status() {
     let _guard = CACHE_LOCK.lock().unwrap();
-    let r = tempfile::TempDir::new().unwrap();
+    let r = common::TestRepo::new();
     let repo = r.path();
-    let git = |args: &[&str]| common::git(repo, args);
-    git(&["init"]);
-    git(&["config", "user.email", "test@test"]);
-    git(&["config", "user.name", "test"]);
-    std::fs::write(repo.join("a.txt"), "hello").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(15));
-    git(&["add", "a.txt"]);
-    git(&["commit", "-m", "initial"]);
-    std::thread::sleep(std::time::Duration::from_millis(15));
 
     let cfg = toml::toml! {
         format = "$git_status"

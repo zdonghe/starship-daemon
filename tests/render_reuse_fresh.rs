@@ -1,11 +1,7 @@
 mod common;
 
-use std::time::Duration;
-
 use starship_daemon::cache;
 use starship_daemon::render;
-
-const SETTLE: Duration = Duration::from_millis(15);
 
 #[test]
 fn zero_watcher_version_stays_fresh_across_cds() {
@@ -43,7 +39,7 @@ fn zero_watcher_version_stays_fresh_across_cds() {
     );
 
     std::fs::write(repo.join("untracked.txt"), "new").unwrap();
-    std::thread::sleep(SETTLE);
+    common::settle();
 
     let sub = repo.join("sub");
     std::fs::create_dir_all(&sub).unwrap();

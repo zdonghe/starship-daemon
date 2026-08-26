@@ -199,74 +199,38 @@ mod tests {
     }
 
     #[test]
-    fn component_match_exact() {
-        assert!(component_match("hello", "hello"));
-    }
-
-    #[test]
-    fn component_match_star_zero() {
-        assert!(component_match("*.txt", ".txt"));
-    }
-
-    #[test]
-    fn component_match_star_prefix() {
-        assert!(component_match("*.txt", "readme.txt"));
-    }
-
-    #[test]
-    fn component_match_star_suffix() {
-        assert!(component_match("README*", "README.md"));
-    }
-
-    #[test]
-    fn component_match_star_middle() {
-        assert!(component_match("a*c", "abc"));
-        assert!(component_match("a*c", "abbc"));
-        assert!(component_match("a*c", "ac"));
-    }
-
-    #[test]
-    fn component_match_qmark_exact() {
-        assert!(component_match("?.txt", "a.txt"));
-    }
-
-    #[test]
-    fn component_match_qmark_wrong_len() {
-        assert!(!component_match("?.txt", "ab.txt"));
-    }
-
-    #[test]
-    fn component_match_qmark_combined_star() {
-        assert!(component_match("???-*", "abc-main"));
-        assert!(!component_match("???-*", "ab-main"));
-    }
-
-    #[test]
-    fn component_match_no_match() {
-        assert!(!component_match("hello", "world"));
-        assert!(!component_match("*.rs", "main.rb"));
-    }
-
-    #[test]
-    fn component_match_multi_star() {
-        assert!(component_match("a*b*c", "axbyc"));
-        assert!(component_match("a*b*c", "abc"));
-    }
-
-    #[test]
-    fn component_match_only_star() {
-        assert!(component_match("*", "anything"));
-    }
-
-    #[test]
-    fn component_match_multibyte() {
-        assert!(component_match("*.txt", "数据.txt"));
-        assert!(component_match("数据*.txt", "数据导出.txt"));
-        assert!(component_match("?.txt", "数.txt"));
-        assert!(component_match("?数据?", "A数据B"));
-        assert!(component_match("*数据", "x数据"));
-        assert!(!component_match("?.txt", "数据.txt"));
-        assert!(!component_match("?数据?", "AB"));
+    fn component_match_cases() {
+        for (pattern, name, expected) in [
+            ("hello", "hello", true),
+            ("*.txt", ".txt", true),
+            ("*.txt", "readme.txt", true),
+            ("README*", "README.md", true),
+            ("a*c", "abc", true),
+            ("a*c", "abbc", true),
+            ("a*c", "ac", true),
+            ("?.txt", "a.txt", true),
+            ("?.txt", "ab.txt", false),
+            ("???-*", "abc-main", true),
+            ("???-*", "ab-main", false),
+            ("hello", "world", false),
+            ("*.rs", "main.rb", false),
+            ("a*b*c", "axbyc", true),
+            ("a*b*c", "abc", true),
+            ("*", "anything", true),
+            ("*.txt", "数据.txt", true),
+            ("数据*.txt", "数据导出.txt", true),
+            ("?.txt", "数.txt", true),
+            ("?数据?", "A数据B", true),
+            ("*数据", "x数据", true),
+            ("?.txt", "数据.txt", false),
+            ("?数据?", "AB", false),
+        ] {
+            assert_eq!(
+                component_match(pattern, name),
+                expected,
+                "pattern {pattern:?} vs name {name:?}"
+            );
+        }
     }
 
     #[test]

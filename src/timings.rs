@@ -1,9 +1,8 @@
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use starship::configs::PROMPT_ORDER;
 use starship::formatter::{StringFormatter, VariableHolder};
 
 use crate::cache;
@@ -51,18 +50,7 @@ fn resolve_format(
     if !base.contains("$all") && !base.contains("${all}") {
         return base.to_string();
     }
-    let expanded: Vec<&str> = PROMPT_ORDER
-        .iter()
-        .copied()
-        .filter(|m| !explicit.contains(*m) && !context.is_module_disabled_in_config(m))
-        .collect();
-    let replacement = expanded
-        .iter()
-        .map(|m| format!("${{{m}}}"))
-        .collect::<Vec<_>>()
-        .join("");
-    base.replace("${all}", &replacement)
-        .replace("$all", &replacement)
+    render::expand_all_core(context, base, |m| explicit.contains(m))
 }
 
 fn implicit_children(
@@ -156,27 +144,6 @@ fn timed_hit_sample(state: &DaemonState, key: &cache::CacheKey, ctx: &RenderCont
     })
 }
 
-fn timed_cold_render(
-    ctx: &RenderContext,
-    git_dir: Option<&Path>,
-    config: &toml::Table,
-) -> Duration {
-    render::clear_repo_cache();
-    let (_out, d) =
-        time_it(|| render::render_prompt_with_config(ctx, git_dir, config, BustDir::Fresh));
-    d
-}
-
-fn timed_warm_render(
-    ctx: &RenderContext,
-    git_dir: Option<&Path>,
-    config: &toml::Table,
-) -> Duration {
-    let (_out, d) =
-        time_it(|| render::render_prompt_with_config(ctx, git_dir, config, BustDir::Fresh));
-    d
-}
-
 fn render_path_rows(cold: Duration, warm: Duration, lru: Duration) -> String {
     let mut rows = String::new();
     for (label, d) in [
@@ -247,25 +214,27 @@ pub(crate) fn build_report(state: &mut DaemonState, req: &ParsedRequest) -> Stri
         keymap,
     };
 
-    let watcher_version = if let Some(repo) = git_dir.as_deref().and_then(Path::parent) {
-        state.watcher.ensure(repo);
-        state.watcher.flush();
-        state.watcher.version(repo)
-    } else {
-        0
-    };
-    let key = cache::compute_cache_key(
-        &ctx.cwd,
-        &ctx.keymap,
-        ctx.terminal_width,
-        config_mtime,
-        watcher_version,
-    );
+    let key = state.cache_key_with_watcher(&ctx, git_dir.as_deref(), config_mtime);
 
     let hit = timed_hit_sample(state, &key, &ctx);
 
-    let cold = timed_cold_render(&ctx, git_dir.as_deref(), &state.cached_config);
-    let warm = timed_warm_render(&ctx, git_dir.as_deref(), &state.cached_config);
+    render::clear_repo_cache();
+    let (_cold_out, cold) = time_it(|| {
+        render::render_prompt_with_config(
+            &ctx,
+            git_dir.as_deref(),
+            &state.cached_config,
+            BustDir::Fresh,
+        )
+    });
+    let (_warm_out, warm) = time_it(|| {
+        render::render_prompt_with_config(
+            &ctx,
+            git_dir.as_deref(),
+            &state.cached_config,
+            BustDir::Fresh,
+        )
+    });
 
     let _ = state.render_prompt(&ctx, git_dir.as_deref(), false, config_mtime);
     let (_lru_out, lru) =

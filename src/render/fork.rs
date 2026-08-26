@@ -3,7 +3,6 @@ use std::path::Path;
 
 use lru::LruCache;
 
-use starship::configs::PROMPT_ORDER;
 use starship::formatter::StringFormatter;
 use starship::formatter::VariableHolder;
 use starship::print::{ModuleCache, get_prompt_with_cache};
@@ -88,17 +87,7 @@ fn expand_all(context: &starship::context::Context) -> String {
 
     let explicit: BTreeSet<&str> = left_vars.union(&right_vars).map(|s| s.as_str()).collect();
 
-    let expanded: Vec<&str> = PROMPT_ORDER
-        .iter()
-        .copied()
-        .filter(|m| !explicit.contains(m) && !context.is_module_disabled_in_config(m))
-        .collect();
-
-    let replacement: String = expanded.iter().map(|m| format!("${}", m)).collect();
-
-    format_str
-        .replace("${all}", &replacement)
-        .replace("$all", &replacement)
+    super::expand_all_core(context, format_str, |m| explicit.contains(m))
 }
 
 fn populate_cache(context: &starship::context::Context, format_str: &str, cache: &mut ModuleCache) {
@@ -123,14 +112,6 @@ fn populate_cache(context: &starship::context::Context, format_str: &str, cache:
     }
 }
 
-fn resolve_format(sctx: &starship::context::Context) -> String {
-    if sctx.root_config.format.contains('$') {
-        expand_all(sctx)
-    } else {
-        sctx.root_config.format.clone()
-    }
-}
-
 fn prepare_and_resolve(
     resolved_gd: Option<&Path>,
     current_dir: &Path,
@@ -138,7 +119,7 @@ fn prepare_and_resolve(
     config: &toml::Table,
 ) -> (starship::context::Context<'static>, String) {
     let sctx = prepare_ctx(resolved_gd, current_dir, ctx, config);
-    let fmt = resolve_format(&sctx);
+    let fmt = expand_all(&sctx);
     (sctx, fmt)
 }
 

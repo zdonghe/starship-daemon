@@ -195,6 +195,24 @@ fn trim_prompt(s: &str) -> String {
     s.trim_end_matches('\n').to_string()
 }
 
+// Shared $all-expansion core used by both the fork render path (expand_all)
+// and the timings module table (resolve_format). The two callers MUST stay
+// behaviorally identical or timings reports drift from real prompts.
+pub(crate) fn expand_all_core(
+    context: &starship::context::Context<'_>,
+    base: &str,
+    is_explicit: impl Fn(&str) -> bool,
+) -> String {
+    let expanded: Vec<&str> = starship::configs::PROMPT_ORDER
+        .iter()
+        .copied()
+        .filter(|m| !is_explicit(m) && !context.is_module_disabled_in_config(m))
+        .collect();
+    let replacement: String = expanded.iter().map(|m| format!("${m}")).collect();
+    base.replace("${all}", &replacement)
+        .replace("$all", &replacement)
+}
+
 #[cfg(test)]
 mod bust_dir_tests {
     use super::{BustDir, bust_for_version, make_bust_dir};

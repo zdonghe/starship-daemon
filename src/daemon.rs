@@ -117,6 +117,28 @@ impl DaemonState {
         mtime
     }
 
+    pub(crate) fn cache_key_with_watcher(
+        &mut self,
+        ctx: &RenderContext,
+        git_dir: Option<&Path>,
+        config_mtime: u64,
+    ) -> CacheKey {
+        let watcher_version = if let Some(repo) = git_dir.and_then(Path::parent) {
+            self.watcher.ensure(repo);
+            self.watcher.flush();
+            self.watcher.version(repo)
+        } else {
+            0
+        };
+        cache::compute_cache_key(
+            &ctx.cwd,
+            &ctx.keymap,
+            ctx.terminal_width,
+            config_mtime,
+            watcher_version,
+        )
+    }
+
     pub(crate) fn render_prompt(
         &mut self,
         ctx: &RenderContext,
@@ -127,20 +149,7 @@ impl DaemonState {
         if disable_cache {
             return render_prompt_with_config(ctx, git_dir, &self.cached_config, BustDir::Fresh);
         }
-        let watcher_version = if let Some(repo) = git_dir.and_then(Path::parent) {
-            self.watcher.ensure(repo);
-            self.watcher.flush();
-            self.watcher.version(repo)
-        } else {
-            0
-        };
-        let key = cache::compute_cache_key(
-            &ctx.cwd,
-            &ctx.keymap,
-            ctx.terminal_width,
-            config_mtime,
-            watcher_version,
-        );
+        let key = self.cache_key_with_watcher(ctx, git_dir, config_mtime);
         render_cached(ctx, git_dir, &self.cached_config, &key, &mut self.lru)
     }
 }

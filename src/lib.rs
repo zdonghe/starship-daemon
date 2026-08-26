@@ -72,14 +72,14 @@ pub fn find_git_dir(cwd: &Path) -> Option<PathBuf> {
     let mut cache = CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(result) = cache.get(cwd) {
-        return result.clone();
-    }
     let actual = if cwd.as_os_str().is_empty() {
         Path::new(".")
     } else {
         cwd
     };
+    if let Some(result) = cache.get(actual) {
+        return result.clone();
+    }
     let result = find_git_dir_uncached(actual);
     cache.put(actual.to_path_buf(), result.clone());
     result

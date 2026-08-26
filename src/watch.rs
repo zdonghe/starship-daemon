@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn boxed_arm_filters_ignored_writes() {
+    fn gitignore_filter_suppresses_ignored_writes() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("repo");
         std::fs::create_dir_all(p.join("a").join("x")).unwrap();

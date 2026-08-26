@@ -31,10 +31,9 @@ pub fn pipe_name() -> String {
         .unwrap_or_else(|_| PIPE_NAME.to_string())
 }
 
+#[cfg(debug_assertions)]
 pub fn debug_enabled() -> bool {
-    static ENABLED: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var("STARSHIP_DAEMON_DEBUG").as_deref() == Ok("1"));
-    *ENABLED
+    true
 }
 
 pub mod cache;

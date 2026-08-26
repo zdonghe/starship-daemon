@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           - variant: stock
-            flags: ""
+            flags: --no-default-features --features stock
           - variant: fork
             flags: --no-default-features --features fork
     steps:
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets
+      - run: cargo test --no-default-features --all-targets --features stock
 
   test-fork:
     runs-on: windows-latest
@@ -49,8 +49,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
+      - run: cargo build --release --no-default-features --features fork
       - uses: actions/upload-artifact@v4
         with:
-          name: starship-daemon-windows-x64
+          name: starship-daemon-fork-windows-x64
           path: target/release/starship-daemon.exe
+
+  pester:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    env:
+      STARSHIP_DAEMON_NO_AUTOSTART: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run psm1 wire-format tests
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.0 -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -MinimumVersion 5.0
+          Invoke-Pester -Configuration @{
+            Run = @{ Path = 'tests/starship-daemon.Tests.ps1'; Exit = $true }
+            Output = @{ Verbosity = 'Detailed' }
+          }

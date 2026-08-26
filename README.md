@@ -8,7 +8,7 @@ Instead of calling `starship prompt ...` as a subprocess on every prompt, the da
 
 ## Install
 
-Requires PowerShell 7.4+ and Windows 10/11 x64.
+Requires PowerShell 5.1+ and Windows 10/11 x64.
 
 1. Grab the latest release: the zip from the [releases page](https://github.com/zdonghe/starship-daemon/releases) contains `starship-daemon-stock.exe`, `starship-daemon-fork.exe`, and `starship-daemon.psm1`. (Or build from source - see [Build](#build).)
 2. Put the `exe` and `psm1` in a folder of your choice.
@@ -21,7 +21,7 @@ Import-Module "C:\path\to\starship-daemon.psm1" -DisableNameChecking
 
 The module auto-starts the daemon and replaces the `prompt` function.
 
-> Use the `-fork.exe` binary for segment-level caching ("fastest", uses the fork - see [Build](#build)). It is also what a plain `cargo build` produces; the stock variant is opt-in for upstream compatibility.
+> Use the `-fork.exe` binary for segment-level caching (fastest, uses the [fork](https://github.com/zdonghe/starship)). A plain `cargo build` produces this variant by default.
 
 ## Config
 
@@ -41,7 +41,7 @@ Try the following command:
 Restart-StarshipDaemon
 ```
 
-This is also the fix if the module keeps falling back to the plain prompt after a daemon crash - while the daemon is down the module fails fast to the plain prompt, and it stays that way until you run `Start-StarshipDaemon` or `Restart-StarshipDaemon`.
+This is also the fix if the module keeps falling back to the plain prompt after a daemon crash - while the daemon is down the module fails to the plain prompt, and it stays that way until you run `Start-StarshipDaemon` or `Restart-StarshipDaemon`.
 
 ## Uninstall
 
@@ -59,7 +59,7 @@ The default feature is `fork`, so a plain build produces the fork-native binary:
 # Fork build (default)
 cargo build --release
 
-# Stock variant (upstream starship, whole-prompt caching)
+# Stock variant (stock starship)
 cargo build --release --no-default-features --features stock
 ```
 
@@ -97,8 +97,6 @@ In a stock build, starship exposes no segment API, so the whole rendered prompt 
 Get-StarshipDaemonTimings [-Cwd <dir>] [-ExitCode 0] [-Keymap emacs]
 ```
 
-The report briefly blocks the daemon, so other terminals' prompts queue behind it. The `Render path timing` section leads with a `cache: HIT` or `cache: MISS` line: it samples the daemon's LRU (without rendering) to predict whether your next real prompt in that directory would be served from cache or re-rendered - the timings request itself never takes the hit path.
-
 ## Environment variables
 
 | Variable | Used by | Meaning |
@@ -108,7 +106,7 @@ The report briefly blocks the daemon, so other terminals' prompts queue behind i
 | `STARSHIP_DAEMON_CACHE` | psm1 | Set to `0` to bypass the daemon's render cache |
 | `STARSHIP_CONFIG` | both | starship config file; changes are hot-reloaded |
 | `STARSHIP_DAEMON_THROTTLE` | daemon | Set to `1` to keep Windows power throttling active (by default the daemon disables it) |
-| `STARSHIP_DAEMON_DEBUG` | daemon | Debug builds only: set to `1` to enable `[dbg]` diagnostics and watcher stats |
+| `STARSHIP_DAEMON_NO_AUTOSTART` | psm1 | Set to any value to prevent the module from auto-starting the daemon on import |
 
 ## Benchmarking
 

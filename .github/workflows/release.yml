@@ -15,7 +15,7 @@ jobs:
       matrix:
         include:
           - variant: stock
-            flags: ""
+            flags: --no-default-features --features stock
           - variant: fork
             flags: --no-default-features --features fork
     steps:

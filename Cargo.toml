@@ -2,12 +2,6 @@
 name = "starship-daemon"
 version = "0.1.0"
 edition = "2024"
-description = "Persistent starship prompt daemon over a Windows named pipe"
-repository = "https://github.com/zdonghe/starship-daemon"
-license = "MIT"
-readme = "README.md"
-keywords = ["starship", "prompt", "named-pipe", "shell"]
-categories = ["command-line-utilities"]
 rust-version = "1.90"
 
 [lib]
@@ -17,14 +11,11 @@ path = "src/lib.rs"
 [features]
 default = ["fork"]
 
-# Links the git fork of `starship`, which adds a segment-level render API
-# (`get_prompt_with_cache` / `get_module_segments` / `ModuleCache`).
-# Caches per-module segments and re-renders the prompt from them, so
-# minute-bucket expiry never re-runs expensive modules like git_status.
+# Links my fork of starship, which adds a segment-level render API
+# Per module caching, time cache becoming invalid does not effect git status cache
 fork = ["dep:starship-fork"]
 
-# Links the upstream `starship` crate from crates.io.
-# Caches whole rendered prompts (per key, minute bucket, exit code).
+# Links the upstream starship crate from crates.io.
 #
 # Build with: cargo build --no-default-features --features stock
 stock = ["dep:starship"]
@@ -42,8 +33,7 @@ tempfile = "3"
 name = "starship-daemon"
 path = "src/main.rs"
 
-# Fork-only integration tests. `required-features` makes cargo skip these
-# targets for stock builds instead of failing on the missing fork API.
+# Fork-only integration tests.
 [[test]]
 name = "render_reuse"
 required-features = ["fork"]

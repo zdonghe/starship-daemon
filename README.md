@@ -19,7 +19,7 @@ $env:STARSHIP_DAEMON_PATH = "C:\path\to\starship-daemon.exe"
 Import-Module "C:\path\to\starship-daemon.psm1" -DisableNameChecking
 ```
 
-The module auto-starts the daemon and replaces the `prompt` function.
+The module auto-starts the daemon and replaces the `prompt` function, and calls `Invoke-Starship-PreCommand`.
 
 > Use the `-fork.exe` binary for segment-level caching (fastest, uses the [fork](https://github.com/zdonghe/starship)). A plain `cargo build` produces this variant by default.
 

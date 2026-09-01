@@ -144,7 +144,10 @@ pub fn render_prompt_with_config(
     }
 
     if let Some(dir) = bust_dir {
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Some(parent) = dir.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
     trim_prompt(&result)
 }

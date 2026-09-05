@@ -103,6 +103,8 @@ fn fresh_bust_version() -> u64 {
 }
 
 fn make_bust_dir(git_dir: &Path, kind: BustDir) -> PathBuf {
+    let bust_root = git_dir.join("bust");
+    let _ = std::fs::remove_dir_all(&bust_root);
     let bust = match kind {
         BustDir::Reuse {
             version,
@@ -147,6 +149,9 @@ pub fn render_prompt_with_config(
         let _ = std::fs::remove_dir_all(&dir);
         if let Some(parent) = dir.parent() {
             let _ = std::fs::remove_dir(parent);
+            if let Some(grandparent) = parent.parent() {
+                let _ = std::fs::remove_dir(grandparent);
+            }
         }
     }
     trim_prompt(&result)
@@ -300,6 +305,26 @@ mod bust_dir_tests {
                 version: 3,
                 config_mtime: 7
             }
+        );
+    }
+
+    #[test]
+    fn make_bust_dir_cleans_previous_bust_tree() {
+        let gd = tempfile::TempDir::new().unwrap();
+        let stale = gd.path().join("bust").join("old_version").join("old_mtime");
+        std::fs::create_dir_all(&stale).unwrap();
+        assert!(stale.exists(), "stale dir must exist before make_bust_dir");
+
+        let _ = make_bust_dir(
+            gd.path(),
+            BustDir::Reuse {
+                version: 1,
+                config_mtime: 2,
+            },
+        );
+        assert!(
+            !gd.path().join("bust").join("old_version").exists(),
+            "stale bust tree must be cleaned before new bust dir is created"
         );
     }
 }

@@ -68,6 +68,9 @@ pub(super) fn render_miss(
         let _ = std::fs::remove_dir_all(&dir);
         if let Some(parent) = dir.parent() {
             let _ = std::fs::remove_dir(parent);
+            if let Some(grandparent) = parent.parent() {
+                let _ = std::fs::remove_dir(grandparent);
+            }
         }
     }
     rendered
